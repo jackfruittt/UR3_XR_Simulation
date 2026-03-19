@@ -2,9 +2,7 @@ using UnityEngine;
 using Unity.Robotics.ROSTCPConnector;
 using RosMessageTypes.Sensor;
 
-/// <summary>
 /// Simple ROS image subscriber - supports both raw and compressed images
-/// </summary>
 public class SimpleImageSubscriber : MonoBehaviour
 {
     [Header("ROS Topic")]

@@ -1,84 +1,76 @@
 // Compute Shader: Depth Image to Point Cloud Conversion
 // Based on Intel RealSense SDK approach - converting depth pixels to 3D XYZ coordinates
 // Reference: librealsense/wrappers/unity/Assets/RealSenseSDK2.0/Scripts/RsPointCloudRenderer.cs
-// The native SDK does this conversion in C++, we're doing it on GPU for performance
 
 #pragma kernel DepthToXYZ
 
 // Input textures from ROS
-Texture2D<float> DepthTexture;        // 16-bit depth in millimeters (or normalized 0-1 if converted)
-Texture2D<float4> ColorTexture;       // RGB color image
-SamplerState samplerDepthTexture;
-SamplerState samplerColorTexture;
+Texture2D<float>  DepthTexture;   // RFloat - raw depth in millimetres
+Texture2D<float4> ColorTexture;   // RGB colour image
 
-// Output buffers
-RWStructuredBuffer<float3> VertexBuffer;   // XYZ positions
-RWStructuredBuffer<float4> ColorBuffer;    // RGBA colors
+// Output buffers (bound once at startup, read directly by vertex shader - no CPU readback)
+RWStructuredBuffer<float3> VertexBuffer;  // XYZ positions
+RWStructuredBuffer<float4> ColorBuffer;   // RGBA colours
 
 // Camera intrinsics (RealSense D455 depth camera intrinsics)
-// These define how to convert 2D pixel coordinates to 3D rays
 float fx;  // Focal length X (pixels)
 float fy;  // Focal length Y (pixels)
 float cx;  // Principal point X (usually width/2)
 float cy;  // Principal point Y (usually height/2)
 
 // Settings
-float depthScale;        // Convert depth units to meters (typically 0.001 for mm→m)
-float minDepth;          // Minimum valid depth in meters
-float maxDepth;          // Maximum valid depth in meters
-int width;               // Image width
-int height;              // Image height
-bool flipYZ;             // Convert from ROS (X-right, Y-down, Z-forward) to Unity (X-right, Y-up, Z-forward)
+float depthScale;  // Convert depth units to metres (0.001 for mm->m)
+float minDepth;    // Minimum valid depth in metres
+float maxDepth;    // Maximum valid depth in metres
+int   width;       // Image width
+int   height;      // Image height
+bool  flipYZ;      // Convert ROS (Y-down) to Unity (Y-up)
+bool  flipBGR;     // Swap BGR->RGB channels (set per-frame from ROS encoding)
 
-[numthreads(8,8,1)]
-void DepthToXYZ (uint3 id : SV_DispatchThreadID)
+#define INVALID_Z 999.0
+
+[numthreads(8, 8, 1)]
+void DepthToXYZ(uint3 id : SV_DispatchThreadID)
 {
-    // Bounds check
     if (id.x >= (uint)width || id.y >= (uint)height)
         return;
-    
+
     int index = id.y * width + id.x;
-    
-    // Sample depth value
-    float2 uv = float2((float)id.x / (float)width, (float)id.y / (float)height);
-    float depth = DepthTexture.SampleLevel(samplerDepthTexture, uv, 0);
-    
-    // Convert depth to meters
-    depth *= depthScale;
-    
-    // Invalid depth check
-    if (depth < minDepth || depth > maxDepth)
+
+    // SampleLevel with a sampler can introduce sub-pixel interpolation on depth
+    // values, which corrupts the metric distance. Direct [id.xy] indexing guarantees
+    // read the exact texel with no filtering
+    float depthMM = DepthTexture[id.xy];
+    float depthM  = depthMM * depthScale;
+
+    // Explicit zero check - zero is the RealSense sentinel for "no depth data"
+    // and would pass the minDepth check if minDepth is set to 0.
+    if (depthMM == 0.0 || depthM < minDepth || depthM > maxDepth)
     {
-        // Mark as invalid - far away point (won't be visible)
-        VertexBuffer[index] = float3(0, 0, 1000);
-        ColorBuffer[index] = float4(0, 0, 0, 0);
+        VertexBuffer[index] = float3(0.0, 0.0, INVALID_Z);
+        ColorBuffer[index]  = float4(0.0, 0.0, 0.0, 0.0);
         return;
     }
-    
+
     // Convert pixel coordinates to 3D point using pinhole camera model
-    // This is the standard formula used by Intel RealSense SDK
     // Reference: rs-pointcloud example in librealsense
-    float x = ((float)id.x - cx) * depth / fx;
-    float y = ((float)id.y - cy) * depth / fy;
-    float z = depth;
-    
-    // Convert from camera coordinates to Unity coordinates
+    float x = ((float)id.x - cx) * depthM / fx;
+    float y = ((float)id.y - cy) * depthM / fy;
+    float z = depthM;
+
     // RealSense: X-right, Y-down, Z-forward
-    // Unity: X-right, Y-up, Z-forward
-    float3 pos;
+    // Unity:     X-right, Y-up,   Z-forward
     if (flipYZ)
-    {
-        pos = float3(x, -y, z);  // Flip Y to convert camera Y-down to Unity Y-up
-    }
+        VertexBuffer[index] = float3(x, -y, z);
     else
-    {
-        pos = float3(x, y, z);
-    }
-    
-    // Sample color at the same UV
-    float4 color = ColorTexture.SampleLevel(samplerColorTexture, uv, 0);
-    
-    // Write to output buffers
-    VertexBuffer[index] = pos;
-    ColorBuffer[index] = color;
+        VertexBuffer[index] = float3(x,  y, z);
+
+    // Reads the raw bytes loaded by LoadRawTextureData and swizzles channels on GPU.
+    float4 col = ColorTexture[id.xy];
+
+    if (flipBGR)
+        col = float4(col.b, col.g, col.r, 1.0);
+
+    ColorBuffer[index] = col;
 }
+
