@@ -1,50 +1,64 @@
-// Compute Shader: Depth Image to Point Cloud Conversion
-// Based on Intel RealSense SDK approach - converting depth pixels to 3D XYZ coordinates
-// Reference: librealsense/wrappers/unity/Assets/RealSenseSDK2.0/Scripts/RsPointCloudRenderer.cs
+// Compute shader that takes the raw depth and colour images from the RealSense and converts
+// each depth pixel into a 3D XYZ point on the GPU. Based on the approach used in the Intel
+// RealSense Unity SDK (RsPointCloudRenderer.cs in librealsense).
 
 #pragma kernel DepthToXYZ
 
-// Input textures from ROS
-Texture2D<float>  DepthTexture;   // RFloat - raw depth in millimetres
+// The two images coming in from ROS - depth in millimetres and the colour frame.
+Texture2D<float>  DepthTexture;   // RFloat - raw 16-bit depth in millimetres
 Texture2D<float4> ColorTexture;   // RGB colour image
 
-// Output buffers (bound once at startup, read directly by vertex shader - no CPU readback)
-RWStructuredBuffer<float3> VertexBuffer;  // XYZ positions
-RWStructuredBuffer<float4> ColorBuffer;   // RGBA colours
+// Output buffers written by this shader and read directly by the vertex shader.
+// Bound once at startup so there is no CPU readback needed each frame.
+RWStructuredBuffer<float3> VertexBuffer;  // XYZ world positions
+RWStructuredBuffer<float4> ColorBuffer;   // RGBA colour per point
 
-// Camera intrinsics (RealSense D455 depth camera intrinsics)
-float fx;  // Focal length X (pixels)
-float fy;  // Focal length Y (pixels)
-float cx;  // Principal point X (usually width/2)
-float cy;  // Principal point Y (usually height/2)
+// Camera intrinsics from the RealSense D455 calibration.
+// These come from the camera_info topic and describe the lens geometry.
+float fx;  // Focal length X in pixels
+float fy;  // Focal length Y in pixels
+float cx;  // Principal point X - optical centre column (roughly width/2)
+float cy;  // Principal point Y - optical centre row (roughly height/2)
 
-// Settings
-float depthScale;  // Convert depth units to metres (0.001 for mm->m)
-float minDepth;    // Minimum valid depth in metres
-float maxDepth;    // Maximum valid depth in metres
-int   width;       // Image width
-int   height;      // Image height
-bool  flipYZ;      // Convert ROS (Y-down) to Unity (Y-up)
-bool  flipBGR;     // Swap BGR->RGB channels (set per-frame from ROS encoding)
+// Depth conversion and filtering settings, set from the C# inspector.
+float depthScale;  // Multiplier to convert raw mm values to metres (0.001)
+float minDepth;    // Ignore points closer than this in metres (filters noise near lens)
+float maxDepth;    // Ignore points further than this in metres
+int   width;       // Image width in pixels
+int   height;      // Image height in pixels
+bool  flipYZ;      // ROS uses Y-down, Unity uses Y-up, so negate Y when this is true
+bool  flipBGR;     // Set per-frame when the colour topic publishes bgr8 instead of rgb8
 
 #define INVALID_Z 999.0
 
+// Each thread group is an 8x8 tile of 64 threads. The C# side dispatches
+// ceil(width/8) x ceil(height/8) groups, which works out to one thread per pixel
+// for a 640x480 image (80 x 60 x 64 = 307,200 threads total).
+//
+// SV_DispatchThreadID gives each thread its global pixel coordinate automatically:
+//   id.x = groupID.x * 8 + localThreadID.x  (pixel column)
+//   id.y = groupID.y * 8 + localThreadID.y  (pixel row)
+//
+// If the resolution is not a clean multiple of 8, a few extra threads get launched.
+// Those are caught and discarded by the bounds check at the top of the function.
 [numthreads(8, 8, 1)]
 void DepthToXYZ(uint3 id : SV_DispatchThreadID)
 {
+    // Discard any threads that landed outside the image due to rounding up the group count.
     if (id.x >= (uint)width || id.y >= (uint)height)
         return;
 
+    // Convert the 2D pixel coordinate into a flat buffer index.
+    // The buffer is row-major so each row is 'width' entries wide.
     int index = id.y * width + id.x;
 
-    // SampleLevel with a sampler can introduce sub-pixel interpolation on depth
-    // values, which corrupts the metric distance. Direct [id.xy] indexing guarantees
-    // read the exact texel with no filtering
+    // Using [id.xy] directly reads the exact texel with no filtering.
+    // A sampler would interpolate between neighbouring pixels which corrupts the depth value.
     float depthMM = DepthTexture[id.xy];
     float depthM  = depthMM * depthScale;
 
-    // Explicit zero check - zero is the RealSense sentinel for "no depth data"
-    // and would pass the minDepth check if minDepth is set to 0.
+    // Zero means the RealSense has no depth reading for this pixel (shadow, overexposure, etc).
+    // It needs its own check because a zero would pass the minDepth test if minDepth is also 0.
     if (depthMM == 0.0 || depthM < minDepth || depthM > maxDepth)
     {
         VertexBuffer[index] = float3(0.0, 0.0, INVALID_Z);
@@ -52,8 +66,19 @@ void DepthToXYZ(uint3 id : SV_DispatchThreadID)
         return;
     }
 
-    // Convert pixel coordinates to 3D point using pinhole camera model
-    // Reference: rs-pointcloud example in librealsense
+    // Pinhole back-projection: work backwards from a 2D pixel + depth to a 3D point.
+    //
+    // The forward pinhole model projects a 3D point onto the image plane like this:
+    //   u = fx * (X / Z) + cx
+    //   v = fy * (Y / Z) + cy
+    //
+    // Rearranging to solve for X and Y given the pixel (u, v) and the measured depth Z:
+    //   X = (u - cx) * Z / fx
+    //   Y = (v - cy) * Z / fy
+    //
+    // Subtracting cx/cy first shifts the pixel origin from the top-left corner to the
+    // optical centre of the lens, so pixels to the left of centre give negative X values.
+    // Dividing by fx/fy converts from pixel units to metres at that depth.
     float x = ((float)id.x - cx) * depthM / fx;
     float y = ((float)id.y - cy) * depthM / fy;
     float z = depthM;
@@ -65,7 +90,8 @@ void DepthToXYZ(uint3 id : SV_DispatchThreadID)
     else
         VertexBuffer[index] = float3(x,  y, z);
 
-    // Reads the raw bytes loaded by LoadRawTextureData and swizzles channels on GPU.
+    // Read the colour for this pixel. If the topic published bgr8, swizzle the channels here
+    // on the GPU rather than doing a CPU byte-swap loop before uploading.
     float4 col = ColorTexture[id.xy];
 
     if (flipBGR)
