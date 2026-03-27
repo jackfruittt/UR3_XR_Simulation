@@ -24,7 +24,7 @@ public class SimpleJointController : MonoBehaviour
         
         Debug.Log("SimpleJointController Start() called");
         
-        // Initialize sliders - use configured min/max from Inspector
+        // Initialise sliders - use configured min/max from Inspector
         for (int i = 0; i < 6; i++)
         {
             if (jointSliders[i] != null)
@@ -68,7 +68,7 @@ public class SimpleJointController : MonoBehaviour
         }
         
         Debug.Log($"SimpleJointController initialized. robotPublisher: {(robotPublisher != null ? "Found" : "NULL")}");
-        Debug.Log("=== ALL SLIDERS INITIALIZED - TRY DRAGGING ONE NOW ===");
+        Debug.Log("=== ALL SLIDERS INITIALISED - TRY DRAGGING ONE NOW ===");
         
         // Sync sliders to robot's home position after a short delay
         if (robotPublisher != null)

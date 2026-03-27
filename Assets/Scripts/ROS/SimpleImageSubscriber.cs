@@ -24,6 +24,10 @@ public class SimpleImageSubscriber : MonoBehaviour
     private ROSConnection ros;
     private Texture2D imageTexture;
     private Material displayMaterial;
+
+    /// Latest RGB texture received from ROS. Null until first message arrives.
+    /// Read by Calibration/detection.cs each frame for AprilTag detection.
+    public Texture2D ColorTexture => imageTexture;
     
     private int frameCount = 0;
     private float lastFPSTime = 0f;

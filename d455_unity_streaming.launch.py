@@ -45,8 +45,10 @@ def generate_launch_description():
                 'enable_gyro': enable_imu,
                 
                 # Simple resolution settings
-                'depth_module.profile': '640x480x30',
-                'rgb_camera.profile': '640x480x30',
+                # D455 native valid modes: depth=848x480, 640x480 | color=1280x720, 640x480
+                # Using 848x480 depth + 1280x720 color (align_depth maps depth -> color res)
+                'depth_module.profile': '848x480x30',
+                'rgb_camera.profile': '1280x720x30',
                 
                 # OUTPUT RAW 16-BIT DEPTH (not colorized)
                 'depth_module.depth_format': 'Z16',  # 16-bit raw depth

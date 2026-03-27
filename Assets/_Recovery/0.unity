@@ -3972,7 +3972,7 @@ MonoBehaviour:
   _tagSize: 0.05
   _decimation: 2
   _tagMaterial: {fileID: 0}
-  _camera: {fileID: 843031975}
+  _camera: {fileID: 0}
 --- !u!114 &930000004
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -4228,8 +4228,8 @@ MonoBehaviour:
   m_faceColor:
     serializedVersion: 2
     rgba: 4294967295
-  m_fontSize: 30
-  m_fontSizeBase: 30
+  m_fontSize: 18
+  m_fontSizeBase: 18
   m_fontWeight: 400
   m_enableAutoSizing: 0
   m_fontSizeMin: 12
@@ -4365,8 +4365,8 @@ MonoBehaviour:
   m_faceColor:
     serializedVersion: 2
     rgba: 4294967295
-  m_fontSize: 30
-  m_fontSizeBase: 30
+  m_fontSize: 16
+  m_fontSizeBase: 16
   m_fontWeight: 400
   m_enableAutoSizing: 0
   m_fontSizeMin: 10
@@ -7686,11 +7686,10 @@ Transform:
   m_GameObject: {fileID: 1655632827}
   serializedVersion: 2
   m_LocalRotation: {x: 0, y: 0, z: 1, w: 0}
-  m_LocalPosition: {x: 0, y: 0, z: 0}
+  m_LocalPosition: {x: 0, y: 0.1, z: 0.05}
   m_LocalScale: {x: 1, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
-  m_Children:
-  - {fileID: 2062282508}
+  m_Children: []
   m_Father: {fileID: 846137789}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 180}
 --- !u!1 &1661118085
@@ -9934,7 +9933,7 @@ MonoBehaviour:
   maxDepth: 10
   flipYZ: 1
   depthToXYZShader: {fileID: 7200000, guid: a91930e5e6a8b796599e0e16437899b5, type: 3}
-  pointSize: 1
+  pointSize: 0.005
   showDebugInfo: 1
 --- !u!23 &2062282506
 MeshRenderer:
@@ -10001,13 +10000,13 @@ Transform:
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 2062282504}
   serializedVersion: 2
-  m_LocalRotation: {x: 0.7071068, y: 0, z: 0, w: 0.7071068}
-  m_LocalPosition: {x: -0, y: -0, z: 0.065}
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: -3.334, y: 7.609, z: 0.119}
   m_LocalScale: {x: 1, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children: []
-  m_Father: {fileID: 1655632828}
-  m_LocalEulerAnglesHint: {x: 90, y: 0, z: 0}
+  m_Father: {fileID: 0}
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
 --- !u!1 &2067183907
 GameObject:
   m_ObjectHideFlags: 0
@@ -10462,6 +10461,7 @@ SceneRoots:
   - {fileID: 449343048}
   - {fileID: 560093645}
   - {fileID: 1661118088}
+  - {fileID: 2062282508}
   - {fileID: 920000002}
   - {fileID: 1608802045}
   - {fileID: 930000002}

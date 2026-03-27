@@ -30,7 +30,7 @@ public class UR3SourceDestinationPublisher : MonoBehaviour
     public bool manualControlMode = true; // Set true to use sliders without ROS interference
     
     // UR3 Home position (safe starting position)
-    private static readonly float[] HomePosition = { 0f, -90f, 0f, -90f, 0f, 0f }; // In degrees
+    private static readonly float[] HomePosition = { 0f, -90f, 0f, -90f, 0f, -90f }; // In degrees
 
 void Start()
 {
