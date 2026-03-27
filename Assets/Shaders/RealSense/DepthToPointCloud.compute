@@ -31,8 +31,8 @@ bool  flipBGR;     // Set per-frame when the colour topic publishes bgr8 instead
 
 #define INVALID_Z 999.0
 
-// Each thread group is an 8x8 tile of 64 threads. The C# side dispatches
-// ceil(width/8) x ceil(height/8) groups, which works out to one thread per pixel
+// Each thread group is an 8x8 tile of 64 threads. C# side dispatches
+// ceil(width/8) x ceil(height/8) groups, i.e. one thread per pixel
 // for a 640x480 image (80 x 60 x 64 = 307,200 threads total).
 //
 // SV_DispatchThreadID gives each thread its global pixel coordinate automatically:
@@ -68,7 +68,7 @@ void DepthToXYZ(uint3 id : SV_DispatchThreadID)
 
     // Pinhole back-projection: work backwards from a 2D pixel + depth to a 3D point.
     //
-    // The forward pinhole model projects a 3D point onto the image plane like this:
+    // The forward pinhole model is:
     //   u = fx * (X / Z) + cx
     //   v = fy * (Y / Z) + cy
     //

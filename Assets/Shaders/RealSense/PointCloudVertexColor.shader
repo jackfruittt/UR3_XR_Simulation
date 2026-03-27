@@ -22,7 +22,7 @@ Shader "ROS/PointCloudVertexColor"
             #pragma target 4.5
             #include "UnityCG.cginc"
 
-            // Compute shader output buffers — bound each frame by ROSPointCloudRenderer.UpdatePointCloud()
+            // Compute shader output buffers - bound each frame by ROSPointCloudRenderer.UpdatePointCloud()
             StructuredBuffer<float3> _VertexBuffer;
             StructuredBuffer<float4> _ColorBuffer;
 

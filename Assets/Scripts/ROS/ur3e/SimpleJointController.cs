@@ -192,6 +192,11 @@ public class SimpleJointController : MonoBehaviour
         }
     }
     
+    public float[] GetCurrentJointAngles()
+    {
+        return currentJointAngles;
+    }
+
     // Individual joint control methods for button-based control
     public void SetJoint(int jointIndex, float angle)
     {

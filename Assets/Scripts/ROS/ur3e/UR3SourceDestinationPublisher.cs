@@ -22,6 +22,9 @@ public class UR3SourceDestinationPublisher : MonoBehaviour
 
     private ArticulationBody[] jointArticulationBodies;
 
+    // Exposes the ArticulationBody array for the IK solver to read joint axes
+    public ArticulationBody[] JointBodies => jointArticulationBodies;
+
     public GameObject target;
     public GameObject targetPlacement;
     public GameObject ur3;
