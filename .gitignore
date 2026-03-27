@@ -73,3 +73,7 @@ crashlytics-build.properties
 
 # ETC
 .DS_Store
+
+# Other
+.idea/
+__pycache__/
