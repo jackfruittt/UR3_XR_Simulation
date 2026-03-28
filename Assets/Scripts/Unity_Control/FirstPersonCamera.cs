@@ -27,7 +27,7 @@ public class FirstPersonCamera : MonoBehaviour
     [Range(0.5f, 10f)]
     public float walkSpeed = 2f;
 
-    [Tooltip("Running speed (m/s) — hold Left Shift")]
+    [Tooltip("Running speed (m/s), hold Left Shift to sprint")]
     [Range(1f, 20f)]
     public float runSpeed = 4f;
 
@@ -48,7 +48,7 @@ public class FirstPersonCamera : MonoBehaviour
             if (cam != null)
                 cameraHead = cam.transform;
             else
-                Debug.LogWarning("[FirstPersonCamera] No Camera child found — assign 'cameraHead' in the Inspector.");
+                Debug.LogWarning("[FirstPersonCamera] No Camera child found; assign cameraHead in Inspector.");
         }
 
         LockCursor();

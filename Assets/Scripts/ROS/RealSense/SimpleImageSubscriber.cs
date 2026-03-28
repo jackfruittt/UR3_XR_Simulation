@@ -65,12 +65,12 @@ public class SimpleImageSubscriber : MonoBehaviour
             // Automatically append /compressed if not already there
             string compressedTopic = topic.EndsWith("/compressed") ? topic : topic + "/compressed";
             ros.Subscribe<CompressedImageMsg>(compressedTopic, UpdateCompressedImage);
-            Debug.Log($"[SimpleImageSubscriber] ✓ Subscribed to COMPRESSED topic: {compressedTopic}");
+            Debug.Log($"[SimpleImageSubscriber] Subscribed to compressed topic: {compressedTopic}");
         }
         else
         {
             ros.Subscribe<ImageMsg>(topic, UpdateRawImage);
-            Debug.Log($"[SimpleImageSubscriber] ✓ Subscribed to RAW topic: {topic}");
+            Debug.Log($"[SimpleImageSubscriber] Subscribed to raw topic: {topic}");
         }
         
         if (targetRenderer != null)
