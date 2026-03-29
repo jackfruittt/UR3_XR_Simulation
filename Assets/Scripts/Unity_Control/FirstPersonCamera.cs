@@ -147,10 +147,10 @@ public class FirstPersonCamera : MonoBehaviour
         var keyboard = Keyboard.current;
         if (keyboard == null) return;
 
-        if (keyboard.upArrowKey.isPressed)    move += transform.forward;
-        if (keyboard.downArrowKey.isPressed)  move -= transform.forward;
-        if (keyboard.leftArrowKey.isPressed)  move -= transform.right;
-        if (keyboard.rightArrowKey.isPressed) move += transform.right;
+        if (keyboard.wKey.isPressed)    move += transform.forward;
+        if (keyboard.sKey.isPressed)    move -= transform.forward;
+        if (keyboard.aKey.isPressed)    move -= transform.right;
+        if (keyboard.dKey.isPressed)    move += transform.right;
         if (keyboard.leftShiftKey.isPressed)  speed  = runSpeed;
 #else
         if (Input.GetKey(KeyCode.UpArrow))    move += transform.forward;

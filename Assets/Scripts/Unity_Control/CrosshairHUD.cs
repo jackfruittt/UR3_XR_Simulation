@@ -303,7 +303,7 @@ public class CrosshairHUD : MonoBehaviour
             y += lineH;
         }
 
-        // Control state -- also reflects singularity escape phase
+        // Control state, also reflects singularity escape phase
         string stateStr;
         Color  stateColor;
         if (_ikSolver != null && _ikSolver.CurrentSolverState == JacobianIKSolver.SolverState.EscapingToHome)
