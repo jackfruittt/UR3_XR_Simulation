@@ -21,7 +21,7 @@ public class SimpleImageSubscriber : MonoBehaviour
     [Header("Performance")]
     public bool showFPS = true;
     
-    private ROSConnection ros;
+    private ROSConnection _ros;
     private Texture2D imageTexture;
     private Material displayMaterial;
 
@@ -35,7 +35,7 @@ public class SimpleImageSubscriber : MonoBehaviour
     
     void Start()
     {
-        ros = ROSConnection.GetOrCreateInstance();
+        _ros = ROSConnection.GetOrCreateInstance();
         
         Debug.Log($"[SimpleImageSubscriber] Mode flags - useAlignedDepth: {useAlignedDepth}, useDepthCamera: {useDepthCamera}, useCompressed: {useCompressed}");
         
@@ -64,12 +64,12 @@ public class SimpleImageSubscriber : MonoBehaviour
         {
             // Automatically append /compressed if not already there
             string compressedTopic = topic.EndsWith("/compressed") ? topic : topic + "/compressed";
-            ros.Subscribe<CompressedImageMsg>(compressedTopic, UpdateCompressedImage);
+            _ros.Subscribe<CompressedImageMsg>(compressedTopic, UpdateCompressedImage);
             Debug.Log($"[SimpleImageSubscriber] Subscribed to compressed topic: {compressedTopic}");
         }
         else
         {
-            ros.Subscribe<ImageMsg>(topic, UpdateRawImage);
+            _ros.Subscribe<ImageMsg>(topic, UpdateRawImage);
             Debug.Log($"[SimpleImageSubscriber] Subscribed to raw topic: {topic}");
         }
         

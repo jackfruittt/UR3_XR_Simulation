@@ -1,11 +1,13 @@
 using UnityEngine;
 using TMPro;
 
+// Reads FK state from RobotFKSolver and actual joint angles from the publisher,
+// then pushes them to two TMP text fields every frame for live debugging.
 public class FKDisplay : MonoBehaviour
 {
     [Header("References")]
     public RobotFKSolver fkSolver;
-    public SimpleJointController jointController;
+    public UR3SourceDestinationPublisher publisher;
 
     [Header("UI Text")]
     public TMP_Text taskSpaceText;
@@ -15,7 +17,7 @@ public class FKDisplay : MonoBehaviour
     {
         if (fkSolver != null && taskSpaceText != null)
         {
-            Vector3 pos = fkSolver.GetEEFPosition();
+            Vector3 pos   = fkSolver.GetEEFPosition();
             Vector3 euler = fkSolver.GetEEFRotation().eulerAngles;
 
             taskSpaceText.text =
@@ -23,9 +25,11 @@ public class FKDisplay : MonoBehaviour
                 $"EEF Rotation\nRx: {euler.x:F1}  Ry: {euler.y:F1}  Rz: {euler.z:F1}";
         }
 
-        if (jointController != null && jointSpaceText != null)
+        if (publisher != null && jointSpaceText != null)
         {
-            float[] angles = jointController.GetCurrentJointAngles();
+            // Use actual physics angles (jointPosition[0]) rather than drive targets,
+            // which can lag behind the true robot state.
+            float[] angles = publisher.GetActualJointAngles();
             if (angles != null && angles.Length == 6)
             {
                 jointSpaceText.text =

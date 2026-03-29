@@ -5,7 +5,7 @@ using RosMessageTypes.Sensor;
 using System;
 
 /// GPU-accelerated point cloud renderer for ROS depth and colour image streams.
-///  Author: Jackson Russell
+/// Author: Jackson Russell
 /// Implementation based on the Intel RealSense Unity SDK approach (RsPointCloudRenderer.cs):
 /// - Utilises MeshTopology.Points for efficient point rendering
 /// - GPU compute shader performs depth pixel to XYZ coordinate conversion
@@ -74,7 +74,7 @@ public class ROSPointCloudRenderer : MonoBehaviour
     public bool showDebugInfo = true;
 
     // ROS TCP connection instance
-    private ROSConnection ros;
+    private ROSConnection _ros;
 
     // GPU texture resources for depth and colour data
     private Texture2D depthTexture;
@@ -104,11 +104,11 @@ public class ROSPointCloudRenderer : MonoBehaviour
     private int  _pendingWidth  = 0;
     private int  _pendingHeight = 0;
 
-    // pre-allocated CPU buffers (eliminates per-frame heap allocation) ---
+    // pre-allocated CPU buffers (eliminates per-frame heap allocation)
     private float[] depthData;
     private byte[] rgbData;
 
-    // cached kernel index and shader property IDs (avoids per-frame string lookup) ---
+    // cached kernel index and shader property IDs (avoids per-frame string lookup)
     private int kernel;
 
     /// Latest depth texture (RFloat, depth in mm as float per pixel).
@@ -139,8 +139,8 @@ public class ROSPointCloudRenderer : MonoBehaviour
 
     void Start()
     {
-        ros = ROSConnection.GetOrCreateInstance();
-        if (ros == null)
+        _ros = ROSConnection.GetOrCreateInstance();
+        if (_ros == null)
         {
             Debug.LogError("[ROSPointCloudRenderer] Failed to establish ROS connection.");
             enabled = false;
@@ -161,9 +161,9 @@ public class ROSPointCloudRenderer : MonoBehaviour
         string depthTopicTrimmed = depthTopic.Trim();
         string colorTopicTrimmed = colorTopic.Trim();
 
-        ros.Subscribe<ImageMsg>(depthTopicTrimmed, OnDepthImageReceived);
-        ros.Subscribe<ImageMsg>(colorTopicTrimmed, OnColorImageReceived);
-        ros.Subscribe<CameraInfoMsg>(cameraInfoTopic.Trim(), OnCameraInfoReceived);
+        _ros.Subscribe<ImageMsg>(depthTopicTrimmed, OnDepthImageReceived);
+        _ros.Subscribe<ImageMsg>(colorTopicTrimmed, OnColorImageReceived);
+        _ros.Subscribe<CameraInfoMsg>(cameraInfoTopic.Trim(), OnCameraInfoReceived);
 
         Debug.Log($"[ROSPointCloudRenderer] Subscribed to depth: {depthTopicTrimmed}");
         Debug.Log($"[ROSPointCloudRenderer] Subscribed to color: {colorTopicTrimmed}");

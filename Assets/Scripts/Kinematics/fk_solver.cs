@@ -1,11 +1,7 @@
 using UnityEngine;
 
-/// A Forward kinematics solver levergaing Unity's built-in Transform hierarchy and Matrix4x4 class.
-/// Used for computing the T_tool0->camera_link pose
-/// 
-/// The solver assumes a fixed, known offset between the robot's end-effector (tool0) and the camera_link.
-/// The solver computes the T_tool0->camera_link pose by applying the known offset to the current T_tool0 pose obtained 
-/// from the robot's Transform in Unity.
+/// FK solver using Unity's Transform hierarchy.
+/// Wraps tool0 and camera_link poses for IK and calibration consumption.
 
 public class RobotFKSolver : MonoBehaviour
 {
@@ -45,5 +41,6 @@ public class RobotFKSolver : MonoBehaviour
     }
 
     public Vector3 GetEEFPosition()  => tool0CameraTransform.position;
-    public Quaternion GetEEFRotation() => tool0CameraTransform.rotation;
+    /// Rotation from tool0 (gripper flange), not camera_link - avoids wrist contortion from camera offset.
+    public Quaternion GetEEFRotation() => tool0Transform.rotation;
 }

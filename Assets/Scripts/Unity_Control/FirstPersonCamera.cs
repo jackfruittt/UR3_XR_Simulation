@@ -119,6 +119,11 @@ public class FirstPersonCamera : MonoBehaviour
         mouseY = Input.GetAxis("Mouse Y") * mouseSensitivity;
 #endif
 
+        // Suppress camera look while the player is driving the IK target marker.
+        if (EEFTargetController.ActiveInstance != null &&
+            EEFTargetController.ActiveInstance.IsControllingTarget)
+            return;
+
         // Yaw - rotate the whole rig around world up
         transform.Rotate(Vector3.up, mouseX, Space.World);
 
@@ -142,17 +147,17 @@ public class FirstPersonCamera : MonoBehaviour
         var keyboard = Keyboard.current;
         if (keyboard == null) return;
 
-        if (keyboard.wKey.isPressed) move += transform.forward;
-        if (keyboard.sKey.isPressed) move -= transform.forward;
-        if (keyboard.aKey.isPressed) move -= transform.right;
-        if (keyboard.dKey.isPressed) move += transform.right;
-        if (keyboard.leftShiftKey.isPressed) speed = runSpeed;
+        if (keyboard.upArrowKey.isPressed)    move += transform.forward;
+        if (keyboard.downArrowKey.isPressed)  move -= transform.forward;
+        if (keyboard.leftArrowKey.isPressed)  move -= transform.right;
+        if (keyboard.rightArrowKey.isPressed) move += transform.right;
+        if (keyboard.leftShiftKey.isPressed)  speed  = runSpeed;
 #else
-        if (Input.GetKey(KeyCode.W)) move += transform.forward;
-        if (Input.GetKey(KeyCode.S)) move -= transform.forward;
-        if (Input.GetKey(KeyCode.A)) move -= transform.right;
-        if (Input.GetKey(KeyCode.D)) move += transform.right;
-        if (Input.GetKey(KeyCode.LeftShift)) speed = runSpeed;
+        if (Input.GetKey(KeyCode.UpArrow))    move += transform.forward;
+        if (Input.GetKey(KeyCode.DownArrow))  move -= transform.forward;
+        if (Input.GetKey(KeyCode.LeftArrow))  move -= transform.right;
+        if (Input.GetKey(KeyCode.RightArrow)) move += transform.right;
+        if (Input.GetKey(KeyCode.LeftShift))  speed  = runSpeed;
 #endif
 
         // Keep movement on the horizontal plane regardless of look direction

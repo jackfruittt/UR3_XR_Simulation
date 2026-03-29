@@ -6,7 +6,7 @@ using UnityEngine;
 
 public class UR3SourceDestinationPublisher : MonoBehaviour
 {
-    ROSConnection ros;
+    ROSConnection _ros;
     public string rosServiceName = "ur3_moveit";
     public string jointCommandTopic = "/unity_joint_commands";
 
@@ -31,33 +31,33 @@ public class UR3SourceDestinationPublisher : MonoBehaviour
     
     [Header("Control Mode")]
     public bool manualControlMode = true; // Set true to use sliders without ROS interference
-    
-    // UR3 Home position (safe starting position)
-    private static readonly float[] HomePosition = { 0f, -90f, 0f, -90f, 0f, -90f }; // In degrees
+
+    // Default ArticulationBody stiffness causes PD overshoot; these give a critically-damped-ish response.
+    [Header("Drive Tuning")]
+    public float driveStiffness  = 400f;
+    public float driveDamping    = 80f;
+    public float driveForceLimit = 300f;
+
+    // Elbow-up ready pose; wrist_2=-90 avoids wrist singularity, elbow=90 avoids elbow-straight singularity.
+    private static readonly float[] HomePosition = { 0f, -90f, 90f, -90f, -90f, 0f }; // In degrees
 
 void Start()
 {
-    ros = ROSConnection.GetOrCreateInstance();
-    ros.Subscribe<JointStateMsg>("/joint_states", UpdateRobotJoints);
-    ros.RegisterPublisher<JointStateMsg>(jointCommandTopic);
+    _ros = ROSConnection.GetOrCreateInstance();
+    _ros.Subscribe<JointStateMsg>("/joint_states", UpdateRobotJoints);
+    _ros.RegisterPublisher<JointStateMsg>(jointCommandTopic);
     
     // Initialize the joint articulation bodies array
     jointArticulationBodies = new ArticulationBody[LinkNames.Length];
     
-    for (int i = 0; i < LinkNames.Length; i++)
+        for (int i = 0; i < LinkNames.Length; i++)
     {
         Transform linkTransform = ur3.transform.Find(LinkNames[i]);
         if (linkTransform != null)
         {
             jointArticulationBodies[i] = linkTransform.GetComponent<ArticulationBody>();
-            if (jointArticulationBodies[i] != null)
-            {
-                Debug.Log($"Found ArticulationBody {i}: {LinkNames[i]}");
-            }
-            else
-            {
+            if (jointArticulationBodies[i] == null)
                 Debug.LogError($"ArticulationBody not found on: {LinkNames[i]}");
-            }
         }
         else
         {
@@ -65,35 +65,35 @@ void Start()
         }
     }
     
-    // Print all ArticulationBodies for verification
-    FindArticulationBodies(ur3.transform, ur3.name);
-    
+    // Tune drives before moving to home so the first commanded step is already damped.
+    TuneAllDrives();
+
     // Set robot to home position
     StartCoroutine(SetHomePositionAfterInit());
 }
 
 System.Collections.IEnumerator SetHomePositionAfterInit()
 {
-    // Wait one frame for physics to initialize
     yield return null;
-    
-    Debug.Log("Setting robot to home position...");
     for (int i = 0; i < HomePosition.Length && i < jointArticulationBodies.Length; i++)
-    {
-        if (jointArticulationBodies[i] != null)
-        {
-            SetJointAngleLocally(i, HomePosition[i]);
-        }
-    }
-    Debug.Log("Robot set to home position");
+        SetJointAngleLocally(i, HomePosition[i]);
 }
-void FindArticulationBodies(Transform t, string path)
+
+void TuneAllDrives()
 {
-    if (t.GetComponent<ArticulationBody>() != null)
-        Debug.Log("AB found: " + path);
-    foreach (Transform child in t)
-        FindArticulationBodies(child, path + "/" + child.name);
+    if (jointArticulationBodies == null) return;
+    foreach (var body in jointArticulationBodies)
+    {
+        if (body == null) continue;
+        var drive         = body.xDrive;
+        drive.stiffness   = driveStiffness;
+        drive.damping     = driveDamping;
+        drive.forceLimit  = driveForceLimit;
+        body.xDrive       = drive;
+    }
 }
+
+void FindArticulationBodies(Transform t, string path) { }
 
     void UpdateRobotJoints(JointStateMsg msg)
 {
@@ -177,10 +177,11 @@ void FindArticulationBodies(Transform t, string path)
             msg.position[i] = jointAngles[i] * Mathf.Deg2Rad;
         }
         
-        ros.Publish(jointCommandTopic, msg);
-        Debug.Log($"Published joint command: [{string.Join(", ", jointAngles)}] degrees");
+        _ros.Publish(jointCommandTopic, msg);
     }
     
+    /// Returns commanded drive targets (degrees).
+    /// NOTE: lags physics position - prefer GetActualJointAngles() for IK feedback.
     public float[] GetCurrentJointAngles()
     {
         if (jointArticulationBodies == null)
@@ -190,9 +191,24 @@ void FindArticulationBodies(Transform t, string path)
         for (int i = 0; i < 6; i++)
         {
             if (jointArticulationBodies[i] != null)
-            {
                 angles[i] = jointArticulationBodies[i].xDrive.target;
-            }
+        }
+        return angles;
+    }
+
+    /// Returns true physics joint positions (degrees) from ArticulationBody.jointPosition[0].
+    /// Use for IK feedback - avoids command/actual mismatch.
+    public float[] GetActualJointAngles()
+    {
+        if (jointArticulationBodies == null)
+            return null;
+
+        float[] angles = new float[6];
+        for (int i = 0; i < 6; i++)
+        {
+            if (jointArticulationBodies[i] != null)
+                // jointPosition is in radians for a 1-DOF revolute body
+                angles[i] = jointArticulationBodies[i].jointPosition[0] * Mathf.Rad2Deg;
         }
         return angles;
     }
@@ -206,36 +222,21 @@ void FindArticulationBodies(Transform t, string path)
     // Move robot to home position
     public void MoveToHomePosition()
     {
-        Debug.Log("Moving to home position...");
         for (int i = 0; i < HomePosition.Length && i < jointArticulationBodies.Length; i++)
-        {
-            if (jointArticulationBodies[i] != null)
-            {
-                SetJointAngleLocally(i, HomePosition[i]);
-            }
-        }
+            SetJointAngleLocally(i, HomePosition[i]);
     }
     
     // Direct local control of individual joints (works without ROS)
     public void SetJointAngleLocally(int jointIndex, float angleDegrees)
     {
-        Debug.Log($"SetJointAngleLocally({jointIndex}, {angleDegrees})");
         if (jointArticulationBodies == null || jointIndex < 0 || jointIndex >= jointArticulationBodies.Length)
-        {
-            Debug.LogError($"Invalid joint index: {jointIndex}");
             return;
-        }
-        
+
         if (jointArticulationBodies[jointIndex] != null)
         {
             var drive = jointArticulationBodies[jointIndex].xDrive;
             drive.target = angleDegrees;
             jointArticulationBodies[jointIndex].xDrive = drive;
-            Debug.Log($"Set joint {jointIndex} target to {angleDegrees} degrees");
-        }
-        else
-        {
-            Debug.LogError($"ArticulationBody at index {jointIndex} is null!");
         }
     }
 }

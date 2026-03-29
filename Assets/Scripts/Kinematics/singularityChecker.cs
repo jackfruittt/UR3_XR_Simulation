@@ -1,14 +1,20 @@
 using UnityEngine;
 
-// Singularity detection for the UR3e, based on the analytical Jacobian determinant
-// derived in Villalobos et al. (2022): https://www.mdpi.com/2218-6581/11/6/137
-// That paper used the UR5 - here we substitute with the UR3e DH parameters.
+/// Singularity detection for the UR3e.
+///
+/// Reference:
+///  Villalobos et al. (2022): https://www.mdpi.com/2218-6581/11/6/137
+///
+/// Notes:
+///  det(J) = sin(q3) * sin(q5) * (a2*c2 + a3*c23 + d5*s234)
+///  Elbow:    sin(q3) = 0  (arm fully stretched or folded)
+///  Wrist:    sin(q5) = 0  (J4 and J6 axes become parallel, lose 1 rotational DOF)
+///  Shoulder: a2*c2 + a3*c23 + d5*s234 = 0  (wrist centre lies on base axis)
 
 public static class SingularityChecker
 {
-    // UR3e Modified DH Parameters (URe-Series datasheet, Table 7/8)
-    // Convention: alpha_{i-1}, a_{i-1}, d_i - same column order as paper Table 1
-    // All lengths in metres. theta offsets (+90deg on J2, -90deg on J4) applied at solve time.
+    // UR3e Modified DH Parameters (Villalobos convention: alpha_{i-1}, a_{i-1}, d_i)
+    // Lengths in metres. Theta offsets (+90deg on J2, -90deg on J4) applied at solve time.
     const float alpha1 = 0f;               const float a1 = 0f;      const float d1 = 0.152f;  // J1
     const float alpha2 = Mathf.PI / 2f;    const float a2 = 0.244f;  const float d2 = 0f;      // J2
     const float alpha3 = 0f;               const float a3 = 0.213f;  const float d3 = 0f;      // J3
@@ -16,61 +22,58 @@ public static class SingularityChecker
     const float alpha5 = -Mathf.PI / 2f;   const float a5 = 0f;      const float d5 = 0.085f;  // J5
     const float alpha6 = Mathf.PI / 2f;    const float a6 = 0f;      const float d6 = 0.092f;  // J6
 
-    // Threshold below which a value is considered zero for singularity purposes.
-    // Paper uses 1e-12 for s3/s5; we use a slightly looser float-safe value.
-    const float Epsilon = 1e-5f;
+    const float Epsilon = 1e-5f;   // float-safe zero threshold (paper uses 1e-12)
 
-    // -------------------------------------------------------------------------
-    // STEP 1 - Jacobian determinant Eq. 46)
-    // det(J) = s3 * s5 * a2 * a3 (c2*a2 + c23*a3/a2 + s234*d5)
-    // Returns a float; near zero = near singular.
-    // -------------------------------------------------------------------------
+    // det(J) = sin(q3)*sin(q5)*(a2*c2 + a3*c23 + d5*s234)  (Eq. 46, Villalobos)
+    // q zero-indexed: q[0]=J1 .. q[5]=J6, radians.
     public static float JacobianDeterminant(float[] q)
     {
-        return 0f;
+        float s3   = Mathf.Sin(q[2]);
+        float s5   = Mathf.Sin(q[4]);
+        float c2   = Mathf.Cos(q[1]);
+        float c23  = Mathf.Cos(q[1] + q[2]);
+        float s234 = Mathf.Sin(q[1] + q[2] + q[3]);
+        float shoulderTerm = a2 * c2 + a3 * c23 + d5 * s234;
+        return s3 * s5 * shoulderTerm;
     }
 
-    // -------------------------------------------------------------------------
-    // STEP 2 - Elbow singularity  (paper Section 2.3)
-    // Occurs when θ3 = 0 or +-pi  ->  s3 = sin(θ3) ~= 0
-    // Robot is fully stretched or fully folded.
-    // -------------------------------------------------------------------------
+    // Elbow: sin(q3) ~= 0
     public static bool IsElbowSingular(float[] q)
     {
-        return false;
+        return Mathf.Abs(Mathf.Sin(q[2])) < Epsilon;
     }
 
-    // -------------------------------------------------------------------------
-    // STEP 3 - Wrist singularity  (Section 2.3)
-    // Occurs when theta5 = 0 or +-pi  ->  s5 = sin(theta5) ~= 0
-    // Joints 4 and 6 axes become parallel; loses one rotational DOF.
-    // -------------------------------------------------------------------------
+    // Wrist: sin(q5) ~= 0
     public static bool IsWristSingular(float[] q)
     {
-        return false;
+        return Mathf.Abs(Mathf.Sin(q[4])) < Epsilon;
     }
 
-    // -------------------------------------------------------------------------
-    // STEP 4 - Shoulder singularity  (Section 2.3)
-    // Occurs when the wrist centre lies directly above/below the base axis.
-    // Condition: a2*c2 + c23*a3 + s234*d5 ~= 0
-    // -------------------------------------------------------------------------
+    // Shoulder: a2*c2 + a3*c23 + d5*s234 ~= 0
     public static bool IsShoulderSingular(float[] q)
     {
-        return false;
+        float c2   = Mathf.Cos(q[1]);
+        float c23  = Mathf.Cos(q[1] + q[2]);
+        float s234 = Mathf.Sin(q[1] + q[2] + q[3]);
+        float shoulderTerm = a2 * c2 + a3 * c23 + d5 * s234;
+        return Mathf.Abs(shoulderTerm) < Epsilon;
     }
 
-    // -------------------------------------------------------------------------
-    // STEP 5 - Combined check + classification
-    // Convenience method for JacobianIKSolver to call each FixedUpdate.
-    // Returns which type(s) of singularity are active, or None.
-    // -------------------------------------------------------------------------
+    // Combined classification - returns active type(s), or None.
     public enum SingularityType { None, Elbow, Wrist, Shoulder, Multiple }
 
     public static SingularityType Classify(float[] q)
     {
-        // TODO: call IsElbow, IsWrist, IsShoulder and combine results
-        return SingularityType.None;
+        bool elbow    = IsElbowSingular(q);
+        bool wrist    = IsWristSingular(q);
+        bool shoulder = IsShoulderSingular(q);
+
+        int count = (elbow ? 1 : 0) + (wrist ? 1 : 0) + (shoulder ? 1 : 0);
+        if (count == 0) return SingularityType.None;
+        if (count > 1)  return SingularityType.Multiple;
+        if (elbow)      return SingularityType.Elbow;
+        if (wrist)      return SingularityType.Wrist;
+        return SingularityType.Shoulder;
     }
 }
 
