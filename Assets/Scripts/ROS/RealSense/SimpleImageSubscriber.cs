@@ -1,19 +1,21 @@
+// Author: Jackson Russell
+
 using UnityEngine;
 using Unity.Robotics.ROSTCPConnector;
 using RosMessageTypes.Sensor;
 
-/// Simple ROS image subscriber - supports both raw and compressed images
+/// Simple ROS image subscriber - supports both raw and compressed images.
 public class SimpleImageSubscriber : MonoBehaviour
 {
     [Header("ROS Topic")]
     public string imageTopic = "/camera/camera/color/image_raw";
-    public bool useCompressed = false; // Set true to use /compressed variant (JPEG/PNG)
+    public bool useCompressed = false; // Set true to use /compressed variant
     public bool useDepthCamera = false; // Use depth camera topic
     public bool useAlignedDepth = false; // Use aligned depth (depth aligned to color camera)
     
     [Header("Display")]
     public Renderer targetRenderer;
-    public bool flipVertically = true; // Flip raw images (compressed usually don't need it)
+    public bool flipVertically = true; // Flip raw images
     
     [Header("Depth Visualization")]
     public float maxDepthMM = 5000f; // Max depth in millimeters to visualize
@@ -32,6 +34,7 @@ public class SimpleImageSubscriber : MonoBehaviour
     private int frameCount = 0;
     private float lastFPSTime = 0f;
     private float currentFPS = 0f;
+    private GUIStyle _fpsStyle;
     
     void Start()
     {
@@ -86,9 +89,9 @@ public class SimpleImageSubscriber : MonoBehaviour
     
     void UpdateCompressedImage(CompressedImageMsg msg)
     {
-        Debug.Log($"[SimpleImageSubscriber] Received compressed image: format={msg.format}, data size: {msg.data.Length}");
-        
-        // Create texture if needed
+        // TODO: LoadImage runs on the ROS callback thread but Texture2D is not thread-safe.
+        // For 90Hz, move texture upload to Update() using a double-buffer (latest frame slot)
+        // so the ROS thread only writes bytes and the main thread does the GPU upload.
         if (imageTexture == null)
         {
             imageTexture = new Texture2D(2, 2);
@@ -118,8 +121,6 @@ public class SimpleImageSubscriber : MonoBehaviour
         int width = (int)msg.width;
         int height = (int)msg.height;
         
-        Debug.Log($"[SimpleImageSubscriber] Received image: {width}x{height}, encoding: {msg.encoding}, data size: {msg.data.Length}");
-        
         // Create texture if needed
         if (imageTexture == null || imageTexture.width != width || imageTexture.height != height)
         {
@@ -137,13 +138,11 @@ public class SimpleImageSubscriber : MonoBehaviour
         // Handle 16-bit depth (16UC1)
         if (msg.encoding == "16UC1" || msg.encoding == "mono16")
         {
-            Debug.Log($"[SimpleImageSubscriber] Processing DEPTH image");
             ProcessDepthImage(msg.data, width, height);
         }
         // Handle RGB/BGR color
         else if (msg.encoding == "rgb8" || msg.encoding == "bgr8")
         {
-            Debug.Log($"[SimpleImageSubscriber] Processing COLOR image (BGR={msg.encoding == "bgr8"})");
             ProcessColorImage(msg.data, width, height, msg.encoding == "bgr8");
         }
         else
@@ -163,6 +162,9 @@ public class SimpleImageSubscriber : MonoBehaviour
     
     void ProcessDepthImage(byte[] data, int width, int height)
     {
+        // TODO: This per-pixel loop is the main CPU bottleneck at 90Hz (480x270 = 129k iterations per frame).
+        // Replace with a compute shader or pass the raw 16UC1 bytes directly to a RFloat texture
+        // and do the depth-to-colour mapping on the GPU.
         Color32[] pixels = new Color32[width * height];
         
         for (int i = 0; i < pixels.Length; i++)
@@ -203,6 +205,8 @@ public class SimpleImageSubscriber : MonoBehaviour
         }
         
         imageTexture.LoadRawTextureData(data);
+        // TODO: LoadRawTextureData + Apply() blocks the main thread GPU upload each frame.
+        // Consider Graphics.CopyTexture or AsyncGPUReadback for non-blocking uploads at 90Hz.
     }
     
     void FlipVertical(Color32[] pixels, int width, int height)
@@ -276,18 +280,26 @@ public class SimpleImageSubscriber : MonoBehaviour
     
     void OnGUI()
     {
-        if (showFPS && imageTexture != null)
+        // Only draw for the colour stream; depth instances would produce a duplicate label.
+        if (showFPS && imageTexture != null && !useDepthCamera && !useAlignedDepth)
         {
-            string mode;
-            if (useAlignedDepth)
-                mode = "Aligned Depth";
-            else if (useDepthCamera)
-                mode = "Depth";
-            else
-                mode = useCompressed ? "Color (Compressed)" : "Color (Raw)";
-            
-            GUI.Label(new Rect(10, 10, 450, 30), 
-                $"{mode} | FPS: {currentFPS:F1} | Size: {imageTexture.width}x{imageTexture.height}");
+            if (_fpsStyle == null)
+            {
+                _fpsStyle = new GUIStyle(GUI.skin.label)
+                {
+                    fontSize  = 22,
+                    fontStyle = FontStyle.Bold,
+                    alignment = TextAnchor.MiddleCenter,
+                };
+                _fpsStyle.normal.textColor = Color.green;
+            }
+
+            const float w = 600f, h = 64f;
+            float x = Screen.width  * 0.97f - w * 0.97f;
+            float y = 10f;
+            GUI.Label(new Rect(x, y, w, h),
+                $"FPS: {currentFPS:F1} | {imageTexture.width}x{imageTexture.height}",
+                _fpsStyle);
         }
     }
     

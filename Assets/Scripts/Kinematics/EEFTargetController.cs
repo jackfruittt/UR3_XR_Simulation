@@ -1,6 +1,9 @@
+// Author: Jackson Russell
+
 using UnityEngine;
 using UnityEngine.InputSystem;
 using UnityEngine.Rendering;
+using UnityEngine.InputSystem.XR;
 
 /// Interactive EEF target controller - cylindrical annular work volume.
 ///
@@ -133,12 +136,33 @@ public class EEFTargetController : MonoBehaviour
 
     private Camera _cam;
 
+    // XR controller input
+    private InputAction  _xrTriggerAction;
+    private bool         _xrTrigTracking;
+    private float        _xrTrigDownTime;
+    private bool         _xrTrigDragging;
+    private LineRenderer _xrPointerLine;
+    private Material     _xrPointerMat;
+    private bool         _xrAimingAtPuck;          // true when ray is close to puck
+    private const float  XRHoverRadius = 0.12f;    // metres — ray-tip within this = hover
+
     void Awake() { ActiveInstance = this; }
-    void OnDestroy() { if (_wireMat) Destroy(_wireMat); if (_ringMat) Destroy(_ringMat); }
+    void OnDestroy()
+    {
+        if (_wireMat) Destroy(_wireMat);
+        if (_ringMat) Destroy(_ringMat);
+        _xrTriggerAction?.Dispose();
+    }
 
     void Start()
     {
         _cam = Camera.main;
+
+        // XR trigger+grip action — either right-hand trigger or grip activates puck control.
+        _xrTriggerAction = new InputAction("XRSelect", InputActionType.Button);
+        _xrTriggerAction.AddBinding("<XRController>{RightHand}/triggerButton");
+        _xrTriggerAction.AddBinding("<XRController>{RightHand}/gripButton");
+        _xrTriggerAction.Enable();
 
         // Seed target at the current FK EEF position projected onto the table surface.
         // Zero initial IK error keeps the arm still. Solver also gated by HasBeenGrabbed.
@@ -262,83 +286,227 @@ public class EEFTargetController : MonoBehaviour
         else            _aimLatchTimer -= Time.deltaTime;
         IsInCrosshairRange = rawInRange || _aimLatchTimer > 0f;
 
-        var  mouse   = Mouse.current;
-        bool lmbDown = mouse.leftButton.wasPressedThisFrame;
-        bool lmbHeld = mouse.leftButton.isPressed;
-        bool lmbUp   = mouse.leftButton.wasReleasedThisFrame;
-
-        // FPS drag-release: if already dragging and the user presses LMB
-        // again (cursor-locked toggle) stop drag immediately and don't start a new one.
-        if (cursorLocked && IsControllingTarget && lmbDown)
+        // XR controller input (right hand trigger)
+        if (XRRigSetup.Instance != null && XRRigSetup.Instance.IsXRActive)
         {
-            IsControllingTarget = false;
-            _lmbTracking        = false;
-            _isDragging         = false;
+            UpdateXRPointer();
+            HandleXRTrigger();
         }
         else
         {
-            // Click / drag discrimination
-            // A press shorter than clickMaxDuration with small mouse movement = click.
-            // A longer press or significant movement = drag (continuous positioning).
-            if (lmbDown)
-            {
-                _lmbTracking = true;
-                _lmbDownTime = Time.time;
-                _lmbDownPos  = mouse.position.ReadValue();
-                _isDragging  = false;
-            }
+            // Desktop mouse input
+            var  mouse   = Mouse.current;
+            bool lmbDown = mouse.leftButton.wasPressedThisFrame;
+            bool lmbHeld = mouse.leftButton.isPressed;
+            bool lmbUp   = mouse.leftButton.wasReleasedThisFrame;
 
-            // Upgrade to drag mid-hold once threshold is crossed.
-            if (_lmbTracking && lmbHeld && !_isDragging && IsInCrosshairRange && !IsControllingTarget)
+            // FPS drag-release: if already dragging and the user presses LMB
+            // again (cursor-locked toggle) stop drag immediately and don't start a new one.
+            if (cursorLocked && IsControllingTarget && lmbDown)
             {
-                float moved = (mouse.position.ReadValue() - _lmbDownPos).magnitude;
-                if (Time.time - _lmbDownTime > clickMaxDuration || moved > clickMaxMovePx)
+                IsControllingTarget = false;
+                _lmbTracking        = false;
+                _isDragging         = false;
+            }
+            else
+            {
+                // Click / drag discrimination
+                // A press shorter than clickMaxDuration with small mouse movement = click.
+                // A longer press or significant movement = drag (continuous positioning).
+                if (lmbDown)
                 {
-                    _isDragging         = true;
-                    IsControllingTarget = true;
-                    HasBeenGrabbed      = true;
-                    _arcActive          = false;   // interrupt arc when grabbed
+                    _lmbTracking = true;
+                    _lmbDownTime = Time.time;
+                    _lmbDownPos  = mouse.position.ReadValue();
+                    _isDragging  = false;
+                }
+
+                // Upgrade to drag mid-hold once threshold is crossed.
+                if (_lmbTracking && lmbHeld && !_isDragging && IsInCrosshairRange && !IsControllingTarget)
+                {
+                    float moved = (mouse.position.ReadValue() - _lmbDownPos).magnitude;
+                    if (Time.time - _lmbDownTime > clickMaxDuration || moved > clickMaxMovePx)
+                    {
+                        _isDragging         = true;
+                        IsControllingTarget = true;
+                        HasBeenGrabbed      = true;
+                        _arcActive          = false;   // interrupt arc when grabbed
+                    }
+                }
+
+                if (lmbUp && _lmbTracking)
+                {
+                    if (_isDragging)
+                    {
+                        // End of drag.
+                        IsControllingTarget = false;
+                    }
+                    else if (IsInCrosshairRange)
+                    {
+                        // Short click -> 3-D ray-pick + arc trajectory.
+                        if (TryPickTargetByRay(out Vector3 picked))
+                            StartArcTo(picked);
+                    }
+                    _lmbTracking = false;
+                    _isDragging  = false;
                 }
             }
 
-            if (lmbUp && _lmbTracking)
+            // Continuous drag update
+            if (IsControllingTarget)
             {
-                if (_isDragging)
-                {
-                    // End of drag.
-                    IsControllingTarget = false;
-                }
-                else if (IsInCrosshairRange)
-                {
-                    // Short click -> 3-D ray-pick + arc trajectory.
-                    if (TryPickTargetByRay(out Vector3 picked))
-                        StartArcTo(picked);
-                }
-                _lmbTracking = false;
-                _isDragging  = false;
+                // Re-anchor every frame so the puck tracks the crosshair exactly.
+                _dragPlane = new Plane(-_cam.transform.forward, TargetPosition);
+                DragOnTable(mouse);
             }
-        }
-
-        // Continuous drag update
-        if (IsControllingTarget)
-        {
-            // Re-anchor every frame so the puck tracks the crosshair exactly.
-            _dragPlane = new Plane(-_cam.transform.forward, TargetPosition);
-            DragOnTable(mouse);
         }
 
         // Advance arc (runs only when not manually controlled)
         if (_arcActive && !IsControllingTarget)
             AdvanceArc();
 
-        // Puck colour
+        // Puck colour — XR hover overrides the normal aimed colour
+        bool aimed = IsInCrosshairRange || _xrAimingAtPuck;
         Color targetColor = IsControllingTarget ? markerColorActive
                           : _arcActive          ? markerColorArc
-                          : IsInCrosshairRange  ? markerColorAimed
+                          : aimed               ? markerColorAimed
                           :                       markerColorIdle;
         _currentPuckColor = Color.Lerp(_currentPuckColor, targetColor, Time.deltaTime * 12f);
         SetPuckColor(_currentPuckColor);
+
+        // Scale puck up slightly when XR ray is hovering to make it easier to see.
+        float targetScale = (IsControllingTarget || _xrAimingAtPuck) ? 1.35f : 1f;
+        float curScale    = _puck.transform.localScale.x / puckDiameter;
+        float newScale    = Mathf.Lerp(curScale, targetScale, Time.deltaTime * 10f);
+        _puck.transform.localScale = new Vector3(
+            puckDiameter * newScale, puckHeight * 0.5f, puckDiameter * newScale);
+
         _puck.transform.position = TargetPosition + Vector3.up * (puckHeight * 0.5f);
+    }
+
+    // XR controller methods
+
+    // Draw pointer line from the right controller; highlight when aimed at puck.
+    void UpdateXRPointer()
+    {
+        var ctrl = XRRigSetup.Instance.RightController;
+        if (ctrl == null) return;
+
+        // Lazy-create pointer LineRenderer.
+        if (_xrPointerLine == null)
+        {
+            var go = new GameObject("XR_PointerLine");
+            go.transform.SetParent(ctrl, false);
+            _xrPointerLine             = go.AddComponent<LineRenderer>();
+            _xrPointerLine.positionCount = 2;
+            _xrPointerLine.startWidth  = 0.005f;
+            _xrPointerLine.endWidth    = 0.002f;
+            _xrPointerLine.useWorldSpace = true;
+            _xrPointerLine.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            if (_puckMat != null)
+            {
+                _xrPointerMat = new Material(_puckMat);
+                _xrPointerLine.material = _xrPointerMat;
+            }
+        }
+
+        Ray ray = new Ray(ctrl.position, ctrl.forward);
+        TryPickByControllerRay(ray, out Vector3 hit);
+
+        // Check how close the ray tip is to the puck.
+        float distToPuck = Vector3.Distance(hit, TargetPosition);
+        _xrAimingAtPuck  = distToPuck < XRHoverRadius;
+
+        // Snap the tip to the puck when hovering so it's obvious.
+        Vector3 tip = _xrAimingAtPuck ? TargetPosition : hit;
+
+        // Line colour: green = hovering over puck, cyan = free aim.
+        Color lineCol = _xrAimingAtPuck
+            ? new Color(0.2f, 1f, 0.3f, 1f)
+            : new Color(0.2f, 0.8f, 1f, 0.6f);
+        if (_xrPointerMat != null) ApplyColor(_xrPointerMat, lineCol);
+        _xrPointerLine.startWidth = _xrAimingAtPuck ? 0.007f : 0.004f;
+
+        _xrPointerLine.SetPosition(0, ctrl.position);
+        _xrPointerLine.SetPosition(1, tip);
+    }
+
+    // Click / drag with the right-hand trigger.
+    void HandleXRTrigger()
+    {
+        var ctrl = XRRigSetup.Instance.RightController;
+        if (ctrl == null || _xrTriggerAction == null) return;
+
+        bool trigDown = _xrTriggerAction.WasPressedThisFrame();
+        bool trigHeld = _xrTriggerAction.IsPressed();
+        bool trigUp   = _xrTriggerAction.WasReleasedThisFrame();
+
+        Ray ray = new Ray(ctrl.position, ctrl.forward);
+
+        if (trigDown)
+        {
+            _xrTrigTracking = true;
+            _xrTrigDownTime = Time.time;
+            _xrTrigDragging = false;
+        }
+
+        // Upgrade to drag after hold threshold.
+        if (_xrTrigTracking && trigHeld && !_xrTrigDragging)
+        {
+            if (Time.time - _xrTrigDownTime > clickMaxDuration)
+            {
+                _xrTrigDragging     = true;
+                IsControllingTarget = true;
+                HasBeenGrabbed      = true;
+                _arcActive          = false;
+            }
+        }
+
+        if (trigUp && _xrTrigTracking)
+        {
+            if (_xrTrigDragging)
+            {
+                IsControllingTarget = false;
+            }
+            else
+            {
+                // Short press → arc to target.
+                if (TryPickByControllerRay(ray, out Vector3 picked))
+                    StartArcTo(picked);
+            }
+            _xrTrigTracking = false;
+            _xrTrigDragging = false;
+        }
+
+        // Continuous drag: place puck at ray-vs-table-plane intersection every frame.
+        if (IsControllingTarget && _xrTrigDragging)
+        {
+            var tablePlane = new Plane(Vector3.up, new Vector3(0f, TargetPosition.y, 0f));
+            if (tablePlane.Raycast(ray, out float enter))
+                ClampAndSetTarget(ray.GetPoint(enter));
+        }
+    }
+
+    // Cast a ray from the controller and intersect with the work volume.
+    bool TryPickByControllerRay(Ray ray, out Vector3 result)
+    {
+        result = TargetPosition;
+
+        var hPlane = new Plane(Vector3.up, new Vector3(0f, TargetPosition.y, 0f));
+        if (hPlane.Raycast(ray, out float ht))
+        {
+            result = ClampToVolume(ray.GetPoint(ht));
+            return true;
+        }
+
+        // Fallback: cylinder side-wall.
+        float bx = robotBase != null ? robotBase.position.x : 0f;
+        float bz = robotBase != null ? robotBase.position.z : 0f;
+        if (!IntersectVerticalCylinder(ray, bx, bz, tableMaxRadius, out float tOA, out float tOB))
+            return false;
+        float tEnter = Mathf.Max(0f, Mathf.Min(tOA, tOB));
+        result = ClampToVolume(ray.GetPoint(tEnter));
+        return true;
     }
 
     // Drag: cast the aim ray (screen centre) against the camera-facing plane.
@@ -393,11 +561,11 @@ public class EEFTargetController : MonoBehaviour
         return new Vector3(bx + offset.x, world.y, bz + offset.y);
     }
 
-    // 3-D Click: ray -> annular cylinder intersection
+    // 3-D Click: ray -> work-volume intersection
 
-    /// Casts a ray from the camera and returns the first world point where it enters
-    /// the annular work volume [tableMinRadius, tableMaxRadius] x [yBot, yTop].
-    /// Falls back to the current-height horizontal plane if the ray misses entirely.
+    /// Casts a ray from the camera and returns the XZ position where the crosshair
+    /// intersects the horizontal plane at the current puck height, clamped to the
+    /// annular ring.  Falls back to the cylinder side-wall for near-horizontal rays.
     bool TryPickTargetByRay(out Vector3 result)
     {
         result = TargetPosition;
@@ -409,58 +577,39 @@ public class EEFTargetController : MonoBehaviour
 
         float bx   = robotBase != null ? robotBase.position.x : 0f;
         float bz   = robotBase != null ? robotBase.position.z : 0f;
-        float yBot = tableWorldHeight;
-        float yTop = tableWorldHeight + taskSpaceHeight;
 
-        // Find the interval [tEnter, tExit] where the ray is inside the annular cylinder.
+        // Primary: intersect with the horizontal plane at the current puck height.
+        // This correctly maps the crosshair to an arbitrary XZ position inside the ring,
+        // regardless of whether the camera is inside or outside the outer boundary.
+        var hPlane = new Plane(Vector3.up, new Vector3(0f, TargetPosition.y, 0f));
+        if (hPlane.Raycast(ray, out float ht))
+        {
+            result = ClampToVolume(ray.GetPoint(ht));
+            return true;
+        }
+
+        // Fallback for near-horizontal rays: cylinder side-wall intersection.
         float tEnter = 0f;
         float tExit  = float.MaxValue;
 
-        // Outer cylinder
         if (!IntersectVerticalCylinder(ray, bx, bz, tableMaxRadius, out float tOA, out float tOB))
-            goto FALLBACK;
+            return false;
         tEnter = Mathf.Max(tEnter, Mathf.Min(tOA, tOB));
         tExit  = Mathf.Min(tExit,  Mathf.Max(tOA, tOB));
-        if (tEnter > tExit) goto FALLBACK;
+        if (tEnter > tExit) return false;
 
-        // Inner cylinder: exclude the dead-zone region
         if (IntersectVerticalCylinder(ray, bx, bz, tableMinRadius, out float tIA, out float tIB))
         {
             float tIEnter = Mathf.Min(tIA, tIB);
             float tIExit  = Mathf.Max(tIA, tIB);
-            if (tIEnter <= tEnter && tIExit >= tExit) goto FALLBACK;  // fully inside dead-zone
-            if (tIEnter <= tEnter) tEnter = tIExit;                   // trim from the near side
+            if (tIEnter <= tEnter && tIExit >= tExit) return false;
+            if (tIEnter <= tEnter) tEnter = tIExit;
         }
 
-        // Y slab
-        {
-            float dy = ray.direction.y;
-            if (Mathf.Abs(dy) > 1e-6f)
-            {
-                float tY0 = (yBot - ray.origin.y) / dy;
-                float tY1 = (yTop - ray.origin.y) / dy;
-                tEnter = Mathf.Max(tEnter, Mathf.Min(tY0, tY1));
-                tExit  = Mathf.Min(tExit,  Mathf.Max(tY0, tY1));
-            }
-            else if (ray.origin.y < yBot || ray.origin.y > yTop) goto FALLBACK;
-        }
-
-        if (tEnter > tExit || tExit < 0f) goto FALLBACK;
+        if (tEnter > tExit || tExit < 0f) return false;
 
         result = ClampToVolume(ray.GetPoint(Mathf.Max(tEnter, 0f)));
         return true;
-
-    FALLBACK:
-        {
-            // Project onto horizontal plane at current puck height; clamp to ring.
-            var hPlane = new Plane(Vector3.up, new Vector3(0f, TargetPosition.y, 0f));
-            if (hPlane.Raycast(ray, out float ht))
-            {
-                result = ClampToVolume(ray.GetPoint(ht));
-                return true;
-            }
-        }
-        return false;
     }
 
     /// Intersects a ray with an infinite vertical cylinder at (cx, *, cz).

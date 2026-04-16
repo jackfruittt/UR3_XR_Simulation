@@ -1,3 +1,5 @@
+// Author: Jackson Russell
+
 using System.Collections;
 using Unity.Robotics.ROSTCPConnector;
 using Unity.Robotics.ROSTCPConnector.ROSGeometry;
@@ -211,6 +213,24 @@ void FindArticulationBodies(Transform t, string path) { }
                 angles[i] = jointArticulationBodies[i].jointPosition[0] * Mathf.Rad2Deg;
         }
         return angles;
+    }
+
+    /// Zero-allocation variant: fills <paramref name="buffer"/> in-place (must be length 6).
+    /// Returns true on success, false if bodies are not yet initialised.
+    /// Prefer this over GetActualJointAngles() in hot paths (e.g. FixedUpdate) to avoid
+    /// heap allocations every frame.
+    public bool GetActualJointAnglesInto(float[] buffer)
+    {
+        if (jointArticulationBodies == null || buffer == null || buffer.Length < 6)
+            return false;
+
+        for (int i = 0; i < 6; i++)
+        {
+            buffer[i] = jointArticulationBodies[i] != null
+                ? jointArticulationBodies[i].jointPosition[0] * Mathf.Rad2Deg
+                : 0f;
+        }
+        return true;
     }
     
     // Get the home position values

@@ -3,11 +3,12 @@
     {
       "name": "Keijiro",
       "url": "https://registry.npmjs.com",
-      "scopes": [ "jp.keijiro" ]
+      "scopes": [
+        "jp.keijiro"
+      ]
     }
   ],
   "dependencies": {
-    "jp.keijiro.apriltag": "1.0.2",
     "com.unity.ai.navigation": "2.0.11",
     "com.unity.behavior": "1.0.15",
     "com.unity.cinemachine": "3.1.2",
@@ -18,6 +19,7 @@
     "com.unity.inputsystem": "1.18.0",
     "com.unity.learn.iet-framework": "5.0.2",
     "com.unity.localization": "1.5.9",
+    "com.unity.memoryprofiler": "1.1.12",
     "com.unity.ml-agents": "4.0.2",
     "com.unity.multiplayer.center": "1.0.1",
     "com.unity.physics": "1.4.5",
@@ -32,9 +34,11 @@
     "com.unity.transport": "2.7.0",
     "com.unity.visualeffectgraph": "17.3.0",
     "com.unity.visualscripting": "1.9.10",
+    "com.unity.xr.arfoundation": "6.3.4",
     "com.unity.xr.compositionlayers": "2.3.0",
     "com.unity.xr.hands": "1.7.3",
     "com.unity.xr.meta-openxr": "2.4.0",
+    "jp.keijiro.apriltag": "1.0.2",
     "com.unity.modules.accessibility": "1.0.0",
     "com.unity.modules.adaptiveperformance": "1.0.0",
     "com.unity.modules.ai": "1.0.0",

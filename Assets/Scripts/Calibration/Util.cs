@@ -1,29 +1,23 @@
+// Author: Jackson Russell
+
 using UnityEngine;
 
-
 /// Coordinate frame and camera utilities shared across the calibration pipeline.
-/// 
+///
 /// ROS optical frame  : X right, Y down, Z forward (into scene)
 /// Unity camera space : X right, Y up,   Z forward (into scene)
-/// -> only Y axis flips between the two
+/// Only the Y axis flips between the two coordinate systems.
 ///
-/// ROS uses left-hand -> right-hand quaternion (w, x, y, z vs x, y, z, w) -
+/// Note: ROS quaternion convention is (w, x, y, z); Unity uses (x, y, z, w).
 static public class Util
 {
     /// Returns the vertical field of view of a Unity Camera in radians.
-    /// Use for TagDetector.ProcessImage — the library's PoseEstimationJob requires
+    /// Use for TagDetector.ProcessImage - the library's PoseEstimationJob requires
     /// vertical FOV in radians: focalLength = height/2 / tan(fov/2).
     /// Unity's Camera.fieldOfView is always vertical, so just convert to radians.
     public static float VerticalFOVRadians(Camera camera)
     {
         return camera.fieldOfView * Mathf.Deg2Rad;
-    }
-
-    /// Returns the horizontal field of view of a Unity Camera in degrees.
-    /// NOTE: Do NOT pass this to TagDetector.ProcessImage - it requires vertical FOV in radians.
-    public static float HorizontalFOV(Camera camera)
-    {
-        return Camera.VerticalToHorizontalFieldOfView(camera.fieldOfView, camera.aspect);
     }
 
     /// Converts a position from ROS optical frame to Unity camera space.
@@ -70,13 +64,5 @@ static public class Util
     public static Matrix4x4 TransformToMatrix(Transform t)
     {
         return Matrix4x4.TRS(t.position, t.rotation, Vector3.one);
-    }
-
-    /// Returns the current EEF (tool0) Matrix4x4 in world space.
-    /// Pass the tool0 Transform from the robot hierarchy.
-    public static Matrix4x4 GetEEFMatrix(Transform tool0)
-    {
-        // Only valid during a stationary capture (call after arm has settled)
-        return TransformToMatrix(tool0);
     }
 }

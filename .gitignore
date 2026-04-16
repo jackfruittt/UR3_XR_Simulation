@@ -17,6 +17,15 @@
 # Recordings can get excessive in size
 [Rr]ecordings/
 
+# Unity profiler captures
+ProfilerCaptures/
+
+# Unity auto-recovery scenes
+Assets/_Recovery/
+
+# Third-party SDK source (reference only - install via package manager)
+librealsense-master/
+
 # Uncomment this line if you wish to ignore the asset store tools plugin
 # [Aa]ssets/AssetStoreTools*
 

@@ -1,0 +1,199 @@
+:root {
+    --col-bg:        rgba(8, 8, 12, 0.88);
+    --col-surface:   rgba(20, 20, 30, 0.95);
+    --col-divider:   rgba(255, 255, 255, 0.08);
+    --col-header:    rgba(255, 255, 255, 0.35);
+    --col-label:     rgba(148, 148, 164, 1);
+    --col-value:     rgba(230, 230, 240, 1);
+    --col-blue:      rgba(80, 200, 255, 1);
+    --col-green:     rgba(60, 220, 100, 1);
+    --col-yellow:    rgba(255, 210, 50, 1);
+    --col-red:       rgba(255, 80, 70, 1);
+    --col-teal:      rgba(40, 180, 170, 1);
+    --col-purple:    rgba(150, 80, 220, 1);
+    --col-tab-active: rgba(80, 200, 255, 1);
+    --col-tab-idle:   rgba(148, 148, 164, 1);
+    --font-size-sm:  16px;
+    --font-size-md:  18px;
+    --font-size-hdr: 14px;
+    --radius:        4px;
+    --panel-width:   420px;
+}
+
+.hud-root {
+    position: absolute;
+    bottom: 16px;
+    left: 16px;
+    width: var(--panel-width);
+    flex-direction: column;
+}
+
+/* Tab bar */
+
+.tab-bar {
+    flex-direction: row;
+    background-color: var(--col-surface);
+    border-top-left-radius: var(--radius);
+    border-top-right-radius: var(--radius);
+    border-bottom-width: 1px;
+    border-bottom-color: var(--col-divider);
+    padding: 0px;
+    margin-bottom: 0px;
+}
+
+.tab-btn {
+    flex: 1;
+    height: 38px;
+    background-color: rgba(0,0,0,0);
+    border-width: 0px;
+    border-radius: 0px;
+    color: var(--col-tab-idle);
+    font-size: var(--font-size-sm);
+    -unity-font-style: bold;
+    margin: 0px;
+    padding: 0px;
+    cursor: link;
+}
+
+.tab-btn:hover {
+    background-color: rgba(255,255,255,0.05);
+    color: var(--col-value);
+}
+
+.tab-active {
+    color: var(--col-tab-active);
+    border-bottom-width: 2px;
+    border-bottom-color: var(--col-tab-active);
+}
+
+/* Panel */
+
+.panel {
+    background-color: var(--col-bg);
+    border-bottom-left-radius: var(--radius);
+    border-bottom-right-radius: var(--radius);
+    padding: 14px 16px;
+    flex-direction: column;
+}
+
+.panel-hidden {
+    display: none;
+}
+
+/* Section */
+
+.section {
+    flex-direction: column;
+    margin-bottom: 4px;
+}
+
+.section-header {
+    font-size: var(--font-size-hdr);
+    -unity-font-style: bold;
+    color: var(--col-header);
+    margin-bottom: 4px;
+    margin-top: 4px;
+    letter-spacing: 1px;
+}
+
+.divider {
+    height: 1px;
+    background-color: var(--col-divider);
+    margin-top: 6px;
+    margin-bottom: 6px;
+}
+
+/* Rows */
+
+.row {
+    flex-direction: row;
+    align-items: center;
+    min-height: 26px;
+    margin-bottom: 3px;
+}
+
+.row-label {
+    width: 90px;
+    font-size: var(--font-size-sm);
+    color: var(--col-label);
+    -unity-font-style: normal;
+}
+
+.row-value {
+    flex: 1;
+    font-size: var(--font-size-md);
+    color: var(--col-value);
+    -unity-font-style: bold;
+}
+
+.val-blue   { color: var(--col-blue);   }
+.val-green  { color: var(--col-green);  }
+.val-yellow { color: var(--col-yellow); }
+.val-red    { color: var(--col-red);    }
+
+/* Camera feed */
+
+.camera-feed {
+    width: 388px;
+    height: 220px;
+    background-color: rgba(0,0,0,1);
+    margin-bottom: 8px;
+    border-radius: 2px;
+}
+
+/* Tag list multi-line */
+
+.tag-list {
+    white-space: normal;
+    font-size: var(--font-size-sm);
+}
+
+/* Calibration status */
+
+.calib-status {
+    white-space: normal;
+    font-size: var(--font-size-sm);
+}
+
+/* Button row */
+
+.btn-row {
+    flex-direction: row;
+    margin-bottom: 4px;
+}
+
+/* Buttons */
+
+.btn {
+    flex: 1;
+    height: 40px;
+    border-radius: var(--radius);
+    border-width: 0px;
+    font-size: var(--font-size-sm);
+    -unity-font-style: bold;
+    color: rgba(255,255,255,1);
+    margin-right: 4px;
+    cursor: link;
+}
+
+.btn:last-child {
+    margin-right: 0px;
+}
+
+.btn:hover {
+    opacity: 0.85;
+}
+
+.btn:active {
+    opacity: 0.70;
+}
+
+.btn-primary { background-color: rgba(40, 60, 180, 1);  }
+.btn-teal    { background-color: rgba(20, 140, 130, 1); }
+.btn-green   { background-color: rgba(30, 140, 60,  1); }
+.btn-danger  { background-color: rgba(160, 30, 30,  1); }
+.btn-purple  { background-color: rgba(110, 50, 180, 1); }
+
+.btn-disabled {
+    opacity: 0.35;
+}

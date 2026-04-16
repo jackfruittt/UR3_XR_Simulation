@@ -1,3 +1,5 @@
+// Author: Jackson Russell
+
 using UnityEngine;
 
 /// RMRC + Gradient Descent IK controller for the UR3e.
@@ -14,6 +16,7 @@ using UnityEngine;
 ///  Blend:     w = |det(J)|,  beta = w / (w + wEps)
 ///             q_dot = beta * q_dot_DLS + (1 - beta) * q_dot_GD
 ///  Integrate: q_new = q_actual + q_dot * dt  (written to ArticulationBody drives)
+
 public class JacobianIKSolver : MonoBehaviour
 {
     // Inspector
@@ -21,6 +24,10 @@ public class JacobianIKSolver : MonoBehaviour
     public UR3SourceDestinationPublisher publisher;
     public RobotFKSolver                 fkSolver;
     public EEFTargetController           targetController;
+    [Tooltip("Optional: artificial potential field collision avoidance. " +
+             "Attach a SelfCollisionAvoider component and assign here to add " +
+             "q_dot_rep after the RMRC/GD blend.")]
+    public SelfCollisionAvoider          potentialField;
 
     [Header("RMRC Gains")]
     [Tooltip("Proportional gain on position error (m/s per m).")]
@@ -41,7 +48,7 @@ public class JacobianIKSolver : MonoBehaviour
     [Tooltip("Manipulability threshold. Below this, solver blends toward gradient descent.")]
     public float wEps = 0.01f;
 
-    [Tooltip("GD step size near singularity. Scales J^T·v_des (0.1-1.0).")]
+    [Tooltip("GD step size near singularity. Scales J^T * v_des (0.1-1.0).")]
     public float stepGD = 0.5f;
 
     [Tooltip("Beta threshold below which orientation rows are zeroed; gives the solver freedom to escape bad configs.")]
@@ -103,9 +110,9 @@ public class JacobianIKSolver : MonoBehaviour
     private float _stuckTimer        = 0f;   // time spent with beta < escapeThreshold
     private float _noProgressTimer   = 0f;   // time spent with error > noProgressErrorThreshold
     private float _escapeTimer       = 0f;   // time spent waiting for the arm to reach home
-    private float _resumeTimer    = 0f;   // countdown before IK resumes after homing
-    private float _graceTimer     = -1f;  // countdown for startup grace; -1 = not yet started
-    private bool  _wasGrabbed     = false;
+    private float _resumeTimer       = 0f;   // countdown before IK resumes after homing
+    private float _graceTimer        = -1f;  // countdown for startup grace; -1 = not yet started
+    private bool  _wasGrabbed        = false;
 
     /// Most recently classified singularity type.
     public SingularityChecker.SingularityType LastSingularityType { get; private set; }
@@ -119,7 +126,38 @@ public class JacobianIKSolver : MonoBehaviour
 
     /// Per-joint velocity (rad/s) after proportional scaling, last step.
     /// Index matches joint order. Updated every FixedUpdate including homing.
-    public float[] LastJointVelocitiesRad { get; private set; } = new float[6];
+    /// External readers always receive the same array reference; data is overwritten in place.
+    private readonly float[] _lastJointVelRad = new float[6];
+    public float[] LastJointVelocitiesRad => _lastJointVelRad;
+
+    // Pre-allocated working arrays - eliminates heap allocations every FixedUpdate at 50 Hz.
+    private readonly float[]  _v        = new float[6];
+    private readonly float[]  _qRad     = new float[6];
+    private readonly float[,] _J        = new float[6, 6];
+    private readonly float[,] _A        = new float[6, 6];
+    private readonly float[]  _b        = new float[6];
+    private readonly float[]  _qdotDLS  = new float[6];
+    private readonly float[]  _qdotGD   = new float[6];
+    private readonly float[]  _qdot     = new float[6];
+    private readonly float[]  _goalDeg  = new float[6];
+    private readonly float[]  _qdotHome = new float[6];
+    // Gaussian elimination scratch: [6,7] augmented matrix.
+    private readonly float[,] _gaussM   = new float[6, 7];
+
+    // Pre-allocated actual joint angle buffer.
+    // GetActualJointAnglesInto() fills this in-place - replaces GetActualJointAngles()
+    // which allocated new float[6] every FixedUpdate (50 heap allocs/s).
+    private readonly float[] _actualDeg = new float[6];
+
+    // Cached squared tolerances - avoids sqrt in sqrMagnitude comparisons each frame.
+    private float _posToleranceSq;
+    private float _noProgressSq;
+
+    void Start()
+    {
+        _posToleranceSq = positionTolerance * positionTolerance;
+        _noProgressSq   = noProgressErrorThreshold * noProgressErrorThreshold;
+    }
 
     // FixedUpdate - RMRC core loop
     void FixedUpdate()
@@ -130,7 +168,8 @@ public class JacobianIKSolver : MonoBehaviour
         ArticulationBody[] bodies = publisher.JointBodies;
         if (bodies == null) return;
 
-        float dt = Time.fixedDeltaTime;
+        float dt    = Time.fixedDeltaTime;
+        float invDt = 1f / dt;   // cached once - used in homing velocity calculation below
 
         // Singularity escape state machine:
         //  EscapingToHome - velocity-limited stepping toward home each FixedUpdate.
@@ -139,22 +178,24 @@ public class JacobianIKSolver : MonoBehaviour
         {
             _escapeTimer += dt;
 
-            float[] homePos = publisher.GetHomePosition();
-            float[] actual  = publisher.GetActualJointAngles();
-            if (homePos != null && actual != null)
+            float[] homePos  = publisher.GetHomePosition();
+            bool    gotActual = publisher.GetActualJointAnglesInto(_actualDeg);
+
+            if (homePos != null && gotActual)
             {
                 // Desired velocity: "close all remaining error this step".
                 // LimitVelocities scales the whole vector down proportionally if any
-                // joint would exceed the cap — same rule as normal tracking, no separate gain.
-                float[] qdotHome = new float[6];
+                // joint would exceed the cap - same rule as normal tracking, no separate gain.
                 for (int j = 0; j < 6; j++)
-                    qdotHome[j] = Mathf.DeltaAngle(actual[j], homePos[j]) * Mathf.Deg2Rad / dt;
+                    _qdotHome[j] = Mathf.DeltaAngle(_actualDeg[j], homePos[j])
+                                   * Mathf.Deg2Rad * invDt;
 
-                LimitVelocities(qdotHome);
-                LastJointVelocitiesRad = qdotHome;
+                LimitVelocities(_qdotHome);
+                System.Array.Copy(_qdotHome, _lastJointVelRad, 6);
 
                 for (int j = 0; j < 6; j++)
-                    publisher.SetJointAngleLocally(j, actual[j] + qdotHome[j] * Mathf.Rad2Deg * dt);
+                    publisher.SetJointAngleLocally(
+                        j, _actualDeg[j] + _qdotHome[j] * Mathf.Rad2Deg * dt);
             }
 
             if (IsAtHome() || _escapeTimer >= homingTimeout)
@@ -181,8 +222,6 @@ public class JacobianIKSolver : MonoBehaviour
             return;   // brief settle pause after homing
         }
 
-        // Normal tracking path (SolverState.Tracking)
-
         // Stay idle until the player has grabbed the orb at least once.
         // Prevents the arm charging across the scene on startup.
         if (!targetController.HasBeenGrabbed) return;
@@ -190,12 +229,11 @@ public class JacobianIKSolver : MonoBehaviour
         // Start the grace timer.
         if (!_wasGrabbed)
         {
-            _wasGrabbed   = true;
-            _graceTimer   = startupGracePeriod;
-            _stuckTimer   = 0f;
+            _wasGrabbed = true;
+            _graceTimer = startupGracePeriod;
+            _stuckTimer = 0f;
         }
-        if (_graceTimer > 0f)
-            _graceTimer -= dt;
+        if (_graceTimer > 0f) _graceTimer -= dt;
 
         // 1. Task-space error - position and orientation delta in world space.
         Vector3 posErr = targetController.TargetPosition - fkSolver.GetEEFPosition();
@@ -209,44 +247,42 @@ public class JacobianIKSolver : MonoBehaviour
 
         float oriMag = Mathf.Abs(errAngle) * orientationWeight;
 
-        if (posErr.magnitude < positionTolerance && oriMag < orientationTolerance)
+        // sqrMagnitude avoids sqrt - compare against pre-squared tolerance (cached in Start).
+        if (posErr.sqrMagnitude < _posToleranceSq && oriMag < orientationTolerance)
             return;   // at goal, nothing to do
 
         // 2. Desired EEF velocity: v = [Kp*dp; Ko*dphi*orientationWeight].
-        float[] v = new float[6]
-        {
-            posErr.x * posGain,
-            posErr.y * posGain,
-            posErr.z * posGain,
-            errAxis.x * errAngle * oriGain * orientationWeight,
-            errAxis.y * errAngle * oriGain * orientationWeight,
-            errAxis.z * errAngle * oriGain * orientationWeight,
-        };
+        _v[0] = posErr.x * posGain;
+        _v[1] = posErr.y * posGain;
+        _v[2] = posErr.z * posGain;
+        _v[3] = errAxis.x * errAngle * oriGain * orientationWeight;
+        _v[4] = errAxis.y * errAngle * oriGain * orientationWeight;
+        _v[5] = errAxis.z * errAngle * oriGain * orientationWeight;
 
         // Near-singular: drop orientation rows -> position-only task with null-space freedom.
         // LastBlendFactor is one FixedUpdate stale - acceptable at 50 Hz.
         if (LastBlendFactor < oriDropThreshold)
         {
-            v[3] = 0f;
-            v[4] = 0f;
-            v[5] = 0f;
+            _v[3] = 0f;
+            _v[4] = 0f;
+            _v[5] = 0f;
         }
 
         // 3. Geometric Jacobian J (6x6).
-        float[,] J = BuildJacobian(bodies, fkSolver.GetEEFPosition());
+        BuildJacobian(_J, bodies, fkSolver.GetEEFPosition());
 
-        // 4. Manipulability and singularity type (closed-form det).
-        float[] actualDeg = publisher.GetActualJointAngles();
-        float   w_manip   = 0f;
+        // 4. Singularity evaluation - single trig pass returns det(J) and type together.
+        bool  gotDeg  = publisher.GetActualJointAnglesInto(_actualDeg);
+        float w_manip = 0f;
 
-        if (actualDeg != null)
+        if (gotDeg)
         {
-            float[] qRad = new float[6];
-            for (int i = 0; i < 6; i++) qRad[i] = actualDeg[i] * Mathf.Deg2Rad;
+            for (int i = 0; i < 6; i++) _qRad[i] = _actualDeg[i] * Mathf.Deg2Rad;
 
-            w_manip              = Mathf.Abs(SingularityChecker.JacobianDeterminant(qRad));
-            LastManipulability   = w_manip;
-            LastSingularityType  = SingularityChecker.Classify(qRad);
+            SingularityChecker.EvalResult eval = SingularityChecker.Evaluate(_qRad);
+            w_manip             = Mathf.Abs(eval.Determinant);
+            LastManipulability  = w_manip;
+            LastSingularityType = eval.Type;
 
             if (LastSingularityType != SingularityChecker.SingularityType.None
                 && logSingularityWarnings)
@@ -283,12 +319,15 @@ public class JacobianIKSolver : MonoBehaviour
         // Catches unreachable targets and locked non-singular configurations.
         if (_graceTimer <= 0f)
         {
-            if (posErr.magnitude > noProgressErrorThreshold)
+            // sqrMagnitude avoids sqrt - compare against pre-squared threshold (cached in Start).
+            if (posErr.sqrMagnitude > _noProgressSq)
             {
                 _noProgressTimer += dt;
                 if (_noProgressTimer >= noProgressTimeout)
                 {
-                    TriggerEscapeToHome($"no progress for {_noProgressTimer:F1}s, err={posErr.magnitude * 1000f:F0}mm");
+                    TriggerEscapeToHome(
+                        $"no progress for {_noProgressTimer:F1}s, " +
+                        $"err={Mathf.Sqrt(posErr.sqrMagnitude) * 1000f:F0}mm");
                     return;
                 }
             }
@@ -299,65 +338,73 @@ public class JacobianIKSolver : MonoBehaviour
         }
 
         // 6a. DLS: q_dot = (J^T J + lambda^2 * I)^-1 J^T v
-        float[] qdot_DLS = null;
+        bool dlsValid = false;
         if (beta > 0.01f)
         {
             float lambda2 = lambdaDLS * lambdaDLS;
-            float[,] A = new float[6, 6];
+
+            // J^T*J is symmetric: A[r,c] == A[c,r].
+            // Only compute the upper triangle (21 unique entries), then mirror into lower.
             for (int r = 0; r < 6; r++)
             {
-                for (int c = 0; c < 6; c++)
+                for (int c = r; c < 6; c++)
                 {
                     float s = 0f;
-                    for (int k = 0; k < 6; k++) s += J[k, r] * J[k, c];
-                    A[r, c] = s;
+                    for (int k = 0; k < 6; k++) s += _J[k, r] * _J[k, c];
+                    _A[r, c] = s;
+                    _A[c, r] = s;   // mirror lower triangle
                 }
-                A[r, r] += lambda2;
+                _A[r, r] += lambda2;
             }
 
-            float[] b = new float[6];
             for (int r = 0; r < 6; r++)
             {
                 float s = 0f;
-                for (int k = 0; k < 6; k++) s += J[k, r] * v[k];
-                b[r] = s;
+                for (int k = 0; k < 6; k++) s += _J[k, r] * _v[k];
+                _b[r] = s;
             }
 
-            qdot_DLS = GaussianSolve(A, b);   // null on numerical failure
+            dlsValid = GaussianSolve(_A, _b, _gaussM, _qdotDLS);
         }
 
-        // 6b. GD: q_dot = alpha · J^T v
-        float[] qdot_GD = new float[6];
+        // 6b. GD: q_dot = alpha * J^T * v
         for (int j = 0; j < 6; j++)
         {
             float s = 0f;
-            for (int k = 0; k < 6; k++) s += J[k, j] * v[k];   // J^T[j,k] == J[k,j]
-            qdot_GD[j] = s * stepGD;
+            for (int k = 0; k < 6; k++) s += _J[k, j] * _v[k];   // J^T[j,k] == J[k,j]
+            _qdotGD[j] = s * stepGD;
         }
 
         // 7. Blend the DLS and GD contributions using beta.
-        float[] qdot = new float[6];
         for (int j = 0; j < 6; j++)
         {
-            float dls = (qdot_DLS != null) ? qdot_DLS[j] : 0f;
-            qdot[j] = beta * dls + (1f - beta) * qdot_GD[j];
+            float dls = dlsValid ? _qdotDLS[j] : 0f;
+            _qdot[j] = beta * dls + (1f - beta) * _qdotGD[j];
         }
 
-        // 8. Apply velocity limit, then integrate: q_new = q_actual + q_dot * dt
-        LimitVelocities(qdot);
-        LastJointVelocitiesRad = qdot;
+        // 8. Limit the RMRC/GD task velocities BEFORE adding repulsion.
+        //    Proportional scaling here only affects the task motion, not the APF correction.
+        LimitVelocities(_qdot);
 
-        float[] goalDeg = new float[6];
+        // 8b. Potential field: add repulsive correction AFTER task limiting so the
+        //     proportional rescale inside LimitVelocities cannot shrink task motion.
+        //     AccumulateRepulsiveQdot already clamps each joint to maxRepulsiveVelRad;
+        //     a final per-joint hard clamp below catches any combined excess.
+        potentialField?.AccumulateRepulsiveQdot(_qdot);
+        for (int j = 0; j < 6; j++)
+            _qdot[j] = Mathf.Clamp(_qdot[j], -Mathf.PI, Mathf.PI);
+        System.Array.Copy(_qdot, _lastJointVelRad, 6);
+
         for (int j = 0; j < 6; j++)
         {
-            float baseDeg = (actualDeg != null) ? actualDeg[j] : 0f;
-            goalDeg[j] = baseDeg + qdot[j] * Mathf.Rad2Deg * dt;
+            float baseDeg = gotDeg ? _actualDeg[j] : 0f;
+            _goalDeg[j] = baseDeg + _qdot[j] * Mathf.Rad2Deg * dt;
         }
 
         // 9. Push the new targets directly to the ArticulationBody drives.
         //    RMRC produces smooth, velocity-limited increments each step
         for (int j = 0; j < 6; j++)
-            publisher.SetJointAngleLocally(j, goalDeg[j]);
+            publisher.SetJointAngleLocally(j, _goalDeg[j]);
     }
 
     // Centralised escape trigger - sets state and logs once.
@@ -374,11 +421,10 @@ public class JacobianIKSolver : MonoBehaviour
     // Returns true when all joints are within homeArrivalTolerance degrees of home.
     bool IsAtHome()
     {
-        float[] home   = publisher.GetHomePosition();
-        float[] actual = publisher.GetActualJointAngles();
-        if (home == null || actual == null) return false;
+        float[] home = publisher.GetHomePosition();
+        if (home == null || !publisher.GetActualJointAnglesInto(_actualDeg)) return false;
         for (int i = 0; i < 6; i++)
-            if (Mathf.Abs(Mathf.DeltaAngle(actual[i], home[i])) > homeArrivalTolerance)
+            if (Mathf.Abs(Mathf.DeltaAngle(_actualDeg[i], home[i])) > homeArrivalTolerance)
                 return false;
         return true;
     }
@@ -404,10 +450,9 @@ public class JacobianIKSolver : MonoBehaviour
             qdot[j] = Mathf.Clamp(qdot[j], -Mathf.PI, Mathf.PI);
     }
 
-    // Geometric Jacobian J (6x6)
-    static float[,] BuildJacobian(ArticulationBody[] bodies, Vector3 eefPos)
+    // Geometric Jacobian J (6x6) - writes into pre-allocated buffer, no heap allocation.
+    static void BuildJacobian(float[,] J, ArticulationBody[] bodies, Vector3 eefPos)
     {
-        float[,] J = new float[6, 6];
         for (int i = 0; i < 6; i++)
         {
             if (bodies[i] == null) continue;
@@ -423,15 +468,14 @@ public class JacobianIKSolver : MonoBehaviour
             J[0, i] = tc.x;   J[1, i] = tc.y;   J[2, i] = tc.z;
             J[3, i] = z.x;    J[4, i] = z.y;     J[5, i] = z.z;
         }
-        return J;
     }
 
-    // 6x6 Gaussian elimination with partial pivoting
-    // Returns null on numerical singularity (pivot < 1e-10).
-    static float[] GaussianSolve(float[,] A, float[] b)
+    // 6x6 Gaussian elimination with partial pivoting.
+    // Writes solution into pre-allocated result[]. Returns false on numerical singularity (pivot < 1e-10).
+    // M is a pre-allocated [6,7] augmented-matrix scratch buffer.
+    static bool GaussianSolve(float[,] A, float[] b, float[,] M, float[] result)
     {
         const int N = 6;
-        float[,] M = new float[N, N + 1];
         for (int r = 0; r < N; r++)
         {
             for (int c = 0; c < N; c++) M[r, c] = A[r, c];
@@ -447,7 +491,7 @@ public class JacobianIKSolver : MonoBehaviour
                 float v = Mathf.Abs(M[row, col]);
                 if (v > maxVal) { maxVal = v; pivot = row; }
             }
-            if (maxVal < 1e-10f) return null;
+            if (maxVal < 1e-10f) return false;
 
             if (pivot != col)
                 for (int c = 0; c <= N; c++)
@@ -463,14 +507,14 @@ public class JacobianIKSolver : MonoBehaviour
             }
         }
 
-        float[] x = new float[N];
+        // Back-substitution writes directly into result[] (filled high-to-low, safe in-place).
         for (int row = N - 1; row >= 0; row--)
         {
             float s = M[row, N];
-            for (int c = row + 1; c < N; c++) s -= M[row, c] * x[c];
-            x[row] = s / M[row, row];
+            for (int c = row + 1; c < N; c++) s -= M[row, c] * result[c];
+            result[row] = s / M[row, row];
         }
-        return x;
+        return true;
     }
 }
 

@@ -1,0 +1,403 @@
+% UR3e XR Simulation — Mathematical Reference
+% pdflatex math_reference.tex  (run twice for TOC)
+\documentclass[11pt,a4paper]{article}
+
+\usepackage{amsmath,amssymb}
+\usepackage{geometry}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{parskip}
+\geometry{margin=2.5cm}
+
+\title{UR3e XR Simulation\\[4pt]\large Mathematical Reference}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+\section{Homogeneous Transforms (SE(3))}
+
+Poses are $4\times4$ rigid-body matrices:
+\[
+T = \begin{bmatrix} R & \mathbf{t} \\ \mathbf{0}^\top & 1 \end{bmatrix},
+\quad R \in SO(3),\; \mathbf{t} \in \mathbb{R}^3
+\]
+\[
+T_{A\to C} = T_{A\to B}\,T_{B\to C}, \qquad
+T^{-1} = \begin{bmatrix} R^\top & -R^\top\mathbf{t} \\ \mathbf{0}^\top & 1 \end{bmatrix}
+\]
+
+\section{Geometric Jacobian}
+
+Maps joint velocities to EEF twist $[\dot{\mathbf{p}};\,\boldsymbol{\omega}]$:
+\[
+J = \begin{bmatrix}
+\mathbf{z}_1 \times \mathbf{r}_1 & \cdots & \mathbf{z}_6 \times \mathbf{r}_6 \\[3pt]
+\mathbf{z}_1 & \cdots & \mathbf{z}_6
+\end{bmatrix}, \qquad
+\mathbf{r}_i = \mathbf{p}_{\text{EEF}} - \mathbf{p}_i
+\]
+$\mathbf{z}_i$ is joint $i$'s axis in world space; $\mathbf{p}_i$ is its origin.
+
+\section{RMRC — Resolved Motion Rate Control}
+
+\textit{Whitney, 1969.} Proportional controller on Cartesian error:
+\[
+\mathbf{v}_{\text{des}} =
+\begin{bmatrix} K_p\,\Delta\mathbf{p} \\ K_o\,w_\text{ori}\,\theta_e\,\hat{\mathbf{n}}_e \end{bmatrix}
+\in \mathbb{R}^6, \qquad \dot{\mathbf{q}} = J^+\,\mathbf{v}_{\text{des}}
+\]
+$\theta_e, \hat{\mathbf{n}}_e$ are the angle and axis of $q_e = q_{\text{target}}\,q_{\text{EEF}}^{-1}$, wrapped to $[-\pi,\pi]$.
+
+\section{Damped Least Squares (DLS)}
+
+\textit{Nakamura \& Hanafusa, 1986.} Regularises the pseudoinverse near singularities:
+\[
+J^+_{\lambda} = \bigl(J^\top J + \lambda^2 I\bigr)^{-1} J^\top, \qquad
+\dot{\mathbf{q}}_{\text{DLS}} = J^+_\lambda\,\mathbf{v}_{\text{des}}
+\]
+The $6\times6$ system is solved by Gaussian elimination with partial pivoting.
+
+\section{Gradient Descent Fallback}
+
+Deep in a singularity the DLS inverse is unreliable. A step size $\alpha$ replaces it:
+\[
+\dot{\mathbf{q}}_{\text{GD}} = \alpha\,J^\top \mathbf{v}_{\text{des}}
+\]
+
+\section{Manipulability \& DLS/GD Blend}
+
+\textit{Yoshikawa, 1985.}
+\[
+w = |\det J|, \qquad
+\beta = \frac{w}{w + w_\varepsilon}, \qquad
+\dot{\mathbf{q}} = \beta\,\dot{\mathbf{q}}_{\text{DLS}} + (1-\beta)\,\dot{\mathbf{q}}_{\text{GD}}
+\]
+$\beta \to 1$ when well-conditioned (DLS dominates); $\beta \to 0$ near singular (GD takes over).
+
+\section{Joint Velocity Limiting \& Euler Integration}
+
+Scale the whole vector proportionally so the fastest joint stays within $\dot{q}_{\max}$:
+\[
+s = \min\!\left(1,\;\frac{\dot{q}_{\max}}{\max_j |\dot{q}_j|}\right), \qquad
+\dot{\mathbf{q}} \leftarrow s\,\dot{\mathbf{q}}
+\]
+\[
+\mathbf{q}_{k+1} = \mathbf{q}_k + \dot{\mathbf{q}}\,\Delta t
+\]
+
+\section{Singularity Detection}
+
+\textit{Villalobos et al., 2022.} Closed-form UR3e Jacobian determinant:
+\[
+\det J = \sin q_3 \cdot \sin q_5 \cdot
+\underbrace{(a_2 \cos q_2 + a_3 \cos(q_2{+}q_3) + d_5 \sin(q_2{+}q_3{+}q_4))}_{\text{shoulder term}}
+\]
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+\textbf{Type} & \textbf{Condition} & \textbf{Meaning} \\
+\midrule
+Elbow    & $\sin q_3 \approx 0$ & Arm fully extended or folded \\
+Wrist    & $\sin q_5 \approx 0$ & J4/J6 axes parallel \\
+Shoulder & shoulder term $\approx 0$ & Wrist centre on base axis \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+UR3e DH parameters: $a_2 = 0.244\,\text{m}$, $a_3 = 0.213\,\text{m}$, $d_5 = 0.085\,\text{m}$.
+
+\section{Null-Space Self-Collision Avoidance}
+
+\textit{Khatib, 1986.} When $n > m$ the general IK solution is:
+\[
+\dot{\mathbf{q}} = J^+\dot{\mathbf{r}} + \underbrace{(I - J^+J)}_{P}\,\dot{\mathbf{q}}_0
+\]
+$P$ is the null-space projector ($P^2 = P$). Any $\dot{\mathbf{q}}_0$ projected through $P$
+pursues a secondary objective (e.g.\ collision avoidance) without disturbing the task.
+
+\paragraph{LQO derivation.}
+Minimise $H = \tfrac{1}{2}(\dot{\mathbf{q}} - \dot{\mathbf{q}}_0)^\top W\,(\dot{\mathbf{q}} - \dot{\mathbf{q}}_0)$
+subject to $J\dot{\mathbf{q}} = \dot{\mathbf{r}}$. Via Lagrange multipliers:
+\[
+J^+_W = W^{-1}J^\top(J W^{-1}J^\top)^{-1}, \qquad
+\dot{\mathbf{q}}^* = J^+_W\,\dot{\mathbf{r}} + (I - J^+_W J)\,\dot{\mathbf{q}}_0
+\]
+$W = I$ recovers the Moore–Penrose pseudoinverse.
+
+\section{Pinhole Camera Projection}
+
+Forward and inverse (back-projection):
+\[
+u = f_x\frac{X}{Z} + c_x, \quad v = f_y\frac{Y}{Z} + c_y
+\qquad\Longleftrightarrow\qquad
+X = \frac{u-c_x}{f_x}Z, \quad Y = \frac{v-c_y}{f_y}Z
+\]
+\[
+\theta_H = 2\arctan\!\left(\frac{W}{2f_x}\right)
+\]
+Depth is the median over a $9\times9$ pixel patch (R16 texture: normalised $[0,1]
+\times 65535$ to get mm, divided by 1000 for metres).
+
+\section{Madgwick 6-DOF IMU Filter (Y-up)}
+
+\textit{Madgwick et al., 2011.} State: unit quaternion $\mathbf{q} = [q_0,q_1,q_2,q_3]^\top$.
+
+Objective function with gravity reference $\hat{\mathbf{g}} = [0,1,0]$:
+\begin{align*}
+f_1 &= 2(q_1 q_2 - q_0 q_3) - a_x \\
+f_2 &= 1 - 2(q_1^2 + q_3^2) - a_y \\
+f_3 &= 2(q_2 q_3 + q_0 q_1) - a_z
+\end{align*}
+
+Gradient $\hat{\mathbf{s}} = \nabla_{\mathbf{q}}\|\mathbf{f}\|^2 / \|\cdot\|$:
+\[
+s_0 = -2q_3 f_1 + 2q_1 f_3, \quad
+s_1 = 2q_2 f_1 - 4q_1 f_2 + 2q_0 f_3
+\]
+\[
+s_2 = 2q_1 f_1 + 2q_3 f_3, \quad
+s_3 = -2q_0 f_1 - 4q_3 f_2 + 2q_2 f_3
+\]
+
+Integration:
+\[
+\dot{\mathbf{q}} = \tfrac{1}{2}\,\mathbf{q}\otimes[0,g_x,g_y,g_z] - \beta\hat{\mathbf{s}}, \qquad
+\mathbf{q}_{k+1} = \frac{\mathbf{q}_k + \dot{\mathbf{q}}\,\Delta t}{\|\mathbf{q}_k + \dot{\mathbf{q}}\,\Delta t\|}
+\]
+
+\section{Coordinate Frame Transforms}
+
+ROS optical $\to$ Unity (Y-flip): $\mathbf{p}_U = (x,-y,z)$
+
+Unity world $\to$ ROS world:
+\[
+(x_R,\,y_R,\,z_R) = (z_U,\,-x_U,\,y_U), \qquad
+q^R = (-q^U_z,\,q^U_x,\,-q^U_y,\,q^U_w)
+\]
+
+Camera $\to$ world: $\mathbf{p}_W = R_\text{cam}\mathbf{p}_c + \mathbf{t}_\text{cam}$
+
+\section{Hand-Eye Transform}
+
+Camera pose in EEF frame, read from the URDF hierarchy in simulation:
+\[
+\mathbf{p}_\text{local} = R_\text{EEF}^{-1}(\mathbf{p}_\text{cam} - \mathbf{p}_\text{EEF}), \qquad
+R_\text{local} = R_\text{EEF}^{-1}R_\text{cam}
+\]
+On the real robot this is the $AX = XB$ calibration problem:
+\[
+T_{\text{EEF}_i\to\text{EEF}_j}\,X = X\,T_{\text{cam}_i\to\text{cam}_j}
+\]
+
+\section{AprilTag Position Fusion}
+
+Tag at known world position $\mathbf{p}_\text{tag}^W$, detected at camera-local $\mathbf{p}_\text{tag}^c$:
+\[
+\mathbf{p}_\text{cam}^W = \mathbf{p}_\text{tag}^W - R_\text{cam}^W\,\mathbf{p}_\text{tag}^c
+\]
+Fuses tag-derived position with Madgwick orientation to give a full 6-DOF world pose.
+
+\section{Arc Trajectory}
+
+The target sweeps the outer ring of the work volume rather than cutting straight
+across, keeping clear of the wrist-singularity zone at the centre.
+In cylindrical coordinates $(r,\theta,y)$ around the robot base:
+\[
+\theta(t) = \theta_0 + (\theta_1-\theta_0)\,t, \quad
+r = r_\text{arc}, \quad
+y(t) = y_0 + (y_1-y_0)\,t, \quad t\in[0,1]
+\]
+\[
+x = r_\text{arc}\sin\theta(t), \quad z = r_\text{arc}\cos\theta(t)
+\]
+Work volume: $r \in [r_{\min}, r_{\max}]$, $y \in [y_\text{table},\; y_\text{table}+h]$.
+
+
+\section{Compute Shaders}
+
+\subsection{Thread dispatch — 16$\times$16$\times$1}
+
+The kernel is declared with a $16\times16\times1$ thread group:
+\begin{verbatim}
+[numthreads(16, 16, 1)]
+\end{verbatim}
+
+Each thread processes exactly one depth pixel $(u,v)$ identified by the built-in
+\texttt{SV\_DispatchThreadID} $\mathbf{id} = (id_x, id_y, 0)$.
+The CPU dispatches:
+\[
+\left\lceil \frac{W}{16} \right\rceil \times \left\lceil \frac{H}{16} \right\rceil \times 1
+\quad \text{thread groups}
+\]
+
+giving at most $16\times16$ threads per group and a total thread count of
+$16\lceil W/16\rceil \times 16\lceil H/16\rceil$ — always $\geq W{\times}H$.
+Threads where $id_x \geq W$ or $id_y \geq H$ are culled by a
+bounds guard and write nothing.
+
+The flat output buffer index is:
+\[
+\text{index} = id_y \cdot W + id_x
+\]
+
+\subsection{Why $16\times16$ and not $8\times8$?}
+
+The choice is driven by three hardware constraints.
+
+\paragraph{1.\ Warp / wavefront alignment.}
+NVIDIA GPUs execute threads in \emph{warps} of 32; AMD in \emph{wavefronts} of 64.
+A thread group is partitioned into warps in row-major order.
+
+\begin{center}
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{lcc}
+\toprule
+\textbf{Config} & \textbf{Threads/group} & \textbf{Warps/group (NVIDIA)} \\
+\midrule
+$8\times8\times1$   & 64  & 2 \\
+$16\times16\times1$ & 256 & 8 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+With only 2 warps per group the warp scheduler has little room to hide memory
+latency (texture fetch $\sim$100--400 cycles).  8 warps keeps the execution
+pipelines fed while earlier warps are stalled on reads.
+
+\paragraph{2.\ Memory bus utilisation (coalescing).}
+A row of 16 consecutive threads reads 16 adjacent depth pixels.
+For a 16-bit (2-byte) R16 texture this is a single 32-byte transaction, exactly
+filling one 32-byte memory sub-transaction on current hardware:
+\[
+16\;\text{threads} \times 2\;\text{bytes} = 32\;\text{bytes} = 1\;\text{transaction}
+\]
+An $8\times8$ group issues rows of 8 threads:
+\[
+8\;\text{threads} \times 2\;\text{bytes} = 16\;\text{bytes} \;\Rightarrow\; \text{half-utilised bus}
+\]
+Halving the row width doubles the number of memory transactions for the same pixel count.
+
+\paragraph{3.\ Dispatch overhead at D455 resolution.}
+For the D455 depth stream ($1280\times720$):
+
+\[
+16\times16:\quad \left\lceil\frac{1280}{16}\right\rceil \times \left\lceil\frac{720}{16}\right\rceil
+= 80 \times 45 = 3\,600 \text{ groups}
+\]
+\[
+8\times8:\quad \left\lceil\frac{1280}{8}\right\rceil \times \left\lceil\frac{720}{8}\right\rceil
+= 160 \times 90 = 14\,400 \text{ groups}
+\]
+
+$14\,400$ groups incurs $4\times$ the GPU command-processor overhead with no
+reduction in total thread count ($921\,600$ either way).
+
+\medskip\noindent
+\textbf{Summary:} $16\times16\times1$ maximises warp-level latency hiding,
+fully coalesces 16-bit texture reads into single 32-byte transactions, and
+reduces dispatch overhead by $4\times$ compared to $8\times8\times1$ — at the cost
+of zero additional shared memory or register pressure for this kernel.
+
+\subsection{GPU back-projection}
+
+Rearranging the forward model $u = f_x(X/Z)+c_x$,\; $v = f_y(Y/Z)+c_y$:
+\[
+X = Z\bigl(id_x \cdot \tfrac{1}{f_x} - \tfrac{c_x}{f_x}\bigr), \quad
+Y = Z\bigl(id_y \cdot \tfrac{1}{f_y} - \tfrac{c_y}{f_y}\bigr), \quad
+Z = d_\text{raw}\times 65535 \times 0.001
+\]
+Pre-computed reciprocals (\texttt{invFx}, \texttt{invFy}, \texttt{cx\_over\_fx},
+\texttt{cy\_over\_fy}) avoid per-thread division. Y is negated to flip ROS optical
+(Y-down) to Unity (Y-up).
+
+Colour pixel coordinates scale with image resolution ratio:
+\[
+u_c = \lfloor id_x \cdot W_c/W \rfloor, \qquad v_c = \lfloor id_y \cdot H_c/H \rfloor
+\]
+
+\subsection{Quad expansion (\texttt{PointCloudVertexColor.shader})}
+
+A raw depth pixel maps to a single screen pixel — at short range the cloud looks
+sparse and holey. Each point is instead expanded into a tiny screen-facing quad
+(4 vertices, 2 triangles) in the CPU index buffer (\texttt{MeshTopology.Triangles}).
+
+The vertex shader reads \texttt{SV\_VertexID}:
+\[
+\text{pointIdx} = \lfloor id/4 \rfloor, \qquad \text{cornerIdx} = id \bmod 4
+\]
+
+Half-size scales with depth so quads stay proportional to sensor pixel spacing:
+\[
+hs = s_q \cdot Z
+\]
+
+Corner offsets encode X/Y sign bits from \texttt{cornerIdx}:
+
+\begin{center}
+\begin{tabular}{ccc}
+\toprule
+\textbf{Corner} & \textbf{Bit pattern} & \textbf{Offset} \\
+\midrule
+0 (TL) & \texttt{00} & $(-hs,+hs)$ \\
+1 (BL) & \texttt{01} & $(-hs,-hs)$ \\
+2 (TR) & \texttt{10} & $(+hs,+hs)$ \\
+3 (BR) & \texttt{11} & $(+hs,-hs)$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Each corner is projected to clip space individually so perspective foreshortening is exact.
+
+Default $s_q = 0.003$: the D455 at 640$\times$480 has $\approx 0.134°$ per pixel, giving a
+physical neighbour gap of $Z\tan(0.134°) \approx 0.00234\,Z$. Using $0.003Z$ adds
+$\mathord{\sim}30\%$ overlap so adjacent quads always close without visible holes at any depth.
+
+No geometry shader is used because URP's depth and shadow passes have no geometry stage;
+a \texttt{MeshTopology.Points} + geometry shader combination causes a Vulkan topology
+mismatch and the draw is rejected.
+
+\subsection{TSDF integration}
+
+Kernels \texttt{Integrate} and \texttt{Clear} use $8^3$ thread groups:
+$\lceil N/8\rceil^3$ groups dispatched.
+
+Voxel centre in world space:
+\[
+\mathbf{p}_W = \mathbf{c}_\text{vol} + \left([i,j,k]^\top - \tfrac{N}{2} + \tfrac{1}{2}\right)v_s, \qquad v_s = L/N
+\]
+Project to depth image: $\mathbf{p}_c = T_{W\to c}\,[\mathbf{p}_W;1]$,\; $u = f_x p_{cx}/p_{cz}+c_x$.
+
+Signed distance and truncation:
+\[
+\text{SDF} = z_m - p_{cz}, \qquad
+\text{TSDF} = \text{clamp}(\text{SDF}/d_t,\,-1,\,1)
+\]
+Voxels with $\text{SDF} < -d_t$ are skipped.
+
+KinFu weighted running average:
+\[
+\tilde{d}_\text{new} = \frac{\tilde{d}_\text{old}\,w_\text{old} + \text{TSDF}}{w_\text{old}+1}, \qquad
+w_\text{new} = \min(w_\text{old}+1,\;w_{\max})
+\]
+
+Surface extraction (\texttt{ExtractPoints}, $8^3$ groups): emit voxel $(i,j,k)$ if
+\[
+\text{sign}(\tilde{d}_{i,j,k}) \neq \text{sign}(\tilde{d}_{i+1,j,k})
+\;\lor\; \tilde{d}_{i,j+1,k}
+\;\lor\; \tilde{d}_{i,j,k+1}
+\]
+Slot allocated atomically: $\texttt{slot} = \texttt{InterlockedAdd}(\texttt{Counter}[0], 1)$.
+
+Confidence colour:
+\[
+B = (1-|\tilde{d}|)\cdot\text{sat}(w/20), \qquad
+\text{RGBA} = (0.7B,\;0.85B,\;0.7B+0.3\,\text{sat}(w/20),\;1)
+\]
+
+\end{document}
+

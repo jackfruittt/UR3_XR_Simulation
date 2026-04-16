@@ -1,102 +1,77 @@
-// Compute shader that takes the raw depth and colour images from the RealSense and converts
-// each depth pixel into a 3D XYZ point on the GPU. Based on the approach used in the Intel
-// RealSense Unity SDK (RsPointCloudRenderer.cs in librealsense).
-
 #pragma kernel DepthToXYZ
 
-// The two images coming in from ROS - depth in millimetres and the colour frame.
-Texture2D<float>  DepthTexture;   // RFloat - raw 16-bit depth in millimetres
-Texture2D<float4> ColorTexture;   // RGB colour image
+Texture2D<float>  DepthTexture;   // R16 normalised, multiply by 65535 for raw mm
+Texture2D<float4> ColorTexture;
 
-// Output buffers written by this shader and read directly by the vertex shader.
-// Bound once at startup so there is no CPU readback needed each frame.
-RWStructuredBuffer<float3> VertexBuffer;  // XYZ world positions
-RWStructuredBuffer<float4> ColorBuffer;   // RGBA colour per point
+// float4 stride=16 avoids Vulkan SPIR-V std430 vec3 alignment corruption.
+// w: 1.0 = valid point, 0.0 = invalid/discard.
+RWStructuredBuffer<float4> VertexBuffer;
+RWStructuredBuffer<float4> ColorBuffer;
 
-// Camera intrinsics from the RealSense D455 calibration.
-// These come from the camera_info topic and describe the lens geometry.
-float fx;  // Focal length X in pixels
-float fy;  // Focal length Y in pixels
-float cx;  // Principal point X - optical centre column (roughly width/2)
-float cy;  // Principal point Y - optical centre row (roughly height/2)
+// Camera intrinsics (set once from camera_info)
+float invFx;       // 1 / fx
+float invFy;       // 1 / fy
+float cx_over_fx;  // cx / fx
+float cy_over_fy;  // cy / fy
 
-// Depth conversion and filtering settings, set from the C# inspector.
-float depthScale;  // Multiplier to convert raw mm values to metres (0.001)
-float minDepth;    // Ignore points closer than this in metres (filters noise near lens)
-float maxDepth;    // Ignore points further than this in metres
-int   width;       // Image width in pixels
-int   height;      // Image height in pixels
-bool  flipYZ;      // ROS uses Y-down, Unity uses Y-up, so negate Y when this is true
-bool  flipBGR;     // Set per-frame when the colour topic publishes bgr8 instead of rgb8
+float depthScale;   // mm to metres (0.001)
+float minDepth;
+float maxDepth;
+int   width;
+int   height;
+int   colorWidth;
+int   colorHeight;
+float colorScaleX;  // colorWidth  / (float)width
+float colorScaleY;  // colorHeight / (float)height
 
-#define INVALID_Z 999.0
+// int not bool -- HLSL bool cbuffer is silently zeroed by the HLSL-to-SPIR-V compiler.
+int flipYZ;         // 1 = negate Y (ROS Y-down to Unity Y-up)
+int flipBGR;        // 1 = swap R/B channels
+int flipDepthTexY;  // 1 = flip depth texture read row (corrects depth/colour Y inversion)
 
-// Each thread group is an 8x8 tile of 64 threads. C# side dispatches
-// ceil(width/8) x ceil(height/8) groups, i.e. one thread per pixel
-// for a 640x480 image (80 x 60 x 64 = 307,200 threads total).
-//
-// SV_DispatchThreadID gives each thread its global pixel coordinate automatically:
-//   id.x = groupID.x * 8 + localThreadID.x  (pixel column)
-//   id.y = groupID.y * 8 + localThreadID.y  (pixel row)
-//
-// If the resolution is not a clean multiple of 8, a few extra threads get launched.
-// Those are caught and discarded by the bounds check at the top of the function.
-[numthreads(8, 8, 1)]
+// 16x16 thread groups, one thread per pixel. Dispatched as ceil(w/16) x ceil(h/16) groups.
+[numthreads(16, 16, 1)]
 void DepthToXYZ(uint3 id : SV_DispatchThreadID)
 {
-    // Discard any threads that landed outside the image due to rounding up the group count.
     if (id.x >= (uint)width || id.y >= (uint)height)
         return;
 
-    // Convert the 2D pixel coordinate into a flat buffer index.
-    // The buffer is row-major so each row is 'width' entries wide.
     int index = id.y * width + id.x;
 
-    // Using [id.xy] directly reads the exact texel with no filtering.
-    // A sampler would interpolate between neighbouring pixels which corrupts the depth value.
-    float depthMM = DepthTexture[id.xy];
-    float depthM  = depthMM * depthScale;
+    // R16 normalised [0,1] to uint16 mm value.
+    // flipDepthTexY remaps only the fetch row; back-projection always uses id.y.
+    int   depthRow = (flipDepthTexY != 0) ? (height - 1 - (int)id.y) : (int)id.y;
+    float depthMM  = DepthTexture[int2(id.x, depthRow)] * 65535.0;
+    float depthM   = depthMM * depthScale;
 
-    // Zero means the RealSense has no depth reading for this pixel (shadow, overexposure, etc).
-    // It needs its own check because a zero would pass the minDepth test if minDepth is also 0.
     if (depthMM == 0.0 || depthM < minDepth || depthM > maxDepth)
     {
-        VertexBuffer[index] = float3(0.0, 0.0, INVALID_Z);
-        ColorBuffer[index]  = float4(0.0, 0.0, 0.0, 0.0);
+        VertexBuffer[index] = float4(0, 0, 0, 0);
+        ColorBuffer[index]  = float4(0, 0, 0, 0);
         return;
     }
 
-    // Pinhole back-projection: work backwards from a 2D pixel + depth to a 3D point.
-    //
-    // The forward pinhole model is:
+    // Pinhole back-projection.
+    // Forward model:
     //   u = fx * (X / Z) + cx
     //   v = fy * (Y / Z) + cy
-    //
-    // Rearranging to solve for X and Y given the pixel (u, v) and the measured depth Z:
-    //   X = (u - cx) * Z / fx
-    //   Y = (v - cy) * Z / fy
-    //
-    // Subtracting cx/cy first shifts the pixel origin from the top-left corner to the
-    // optical centre of the lens, so pixels to the left of centre give negative X values.
-    // Dividing by fx/fy converts from pixel units to metres at that depth.
-    float x = ((float)id.x - cx) * depthM / fx;
-    float y = ((float)id.y - cy) * depthM / fy;
+    // Rearranged to recover X, Y from pixel (u, v) and measured depth Z:
+    //   X = (u - cx) * Z / fx  =  Z * (u/fx - cx/fx)
+    //   Y = (v - cy) * Z / fy  =  Z * (v/fy - cy/fy)
+    float x = depthM * ((float)id.x * invFx - cx_over_fx);
+    float y = depthM * ((float)id.y * invFy - cy_over_fy);
     float z = depthM;
 
-    // RealSense: X-right, Y-down, Z-forward
-    // Unity:     X-right, Y-up,   Z-forward
-    if (flipYZ)
-        VertexBuffer[index] = float3(x, -y, z);
-    else
-        VertexBuffer[index] = float3(x,  y, z);
+    VertexBuffer[index] = (flipYZ != 0)
+        ? float4(x, -y, z, 1.0)
+        : float4(x,  y, z, 1.0);
 
-    // Read the colour for this pixel. If the topic published bgr8, swizzle the channels here
-    // on the GPU rather than doing a CPU byte-swap loop before uploading.
-    float4 col = ColorTexture[id.xy];
+    int2   colorPixel = int2((int)((float)id.x * colorScaleX),
+                             (int)((float)id.y * colorScaleY));
+    float4 col        = ColorTexture[colorPixel];
+    float3 rgb        = (flipBGR != 0)
+        ? float3(col.b, col.g, col.r)
+        : float3(col.r, col.g, col.b);
 
-    if (flipBGR)
-        col = float4(col.b, col.g, col.r, 1.0);
-
-    ColorBuffer[index] = col;
+    ColorBuffer[index] = float4(rgb, 1.0);
 }
-

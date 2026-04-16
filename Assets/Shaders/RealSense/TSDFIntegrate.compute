@@ -1,0 +1,191 @@
+// TSDFIntegrate.compute
+// KinFu-style Truncated Signed Distance Function fusion on the GPU.
+//
+// The TSDF volume is a 3D texture where each voxel stores:
+//   R = TSDF value, normalised to [-1, 1] by truncation distance
+//         +1 = free space in front of any surface
+//          0 = exactly on the surface
+//         -1 = solid geometry behind the surface
+//   G = observation weight  (0 = never seen, maxWeight = fully converged)
+//
+// Integration (KinFu eq. 6 / weighted running average):
+//   tsdf_new = (tsdf_old * w_old  +  tsdf_frame) / (w_old + 1)
+//   w_new    = min(w_old + 1,  maxWeight)
+//
+// Extraction: scan volume for sign-change voxels (zero-crossings) and emit
+// world-space positions into a flat buffer read by PointCloudVertexColor.shader.
+
+#pragma kernel Integrate
+#pragma kernel Clear
+#pragma kernel ExtractPoints
+#pragma kernel ClearExtractBuffer
+
+// ── Volume ───────────────────────────────────────────────────────────────────
+RWTexture3D<float2> _Volume;      // written by Integrate + Clear
+Texture3D<float2>   _VolumeRead;  // read by ExtractPoints (SRV binding)
+
+// ── Depth input (from ROSPointCloudRenderer) ─────────────────────────────────
+// Camera-local XYZ per pixel, row-major.  Invalid pixels have z = 999 (INVALID_Z).
+StructuredBuffer<float3> _CameraVerts;
+
+// ── Camera pose ───────────────────────────────────────────────────────────────
+float4x4 _WorldToCamera;          // world → camera-local transform
+
+// ── Volume parameters ─────────────────────────────────────────────────────────
+float3 _VolumeCenter;             // world-space centre of the TSDF box
+float  _VoxelSize;                // metres per voxel (volumeSize / volumeRes)
+int    _VolumeRes;                // voxels per side (same for X, Y, Z)
+float  _TruncDist;                // truncation distance in metres (e.g. 0.06)
+float  _MaxWeight;                // weight cap  (e.g. 50)
+
+// ── Camera intrinsics (filled from cloudRenderer.fx/fy/cx/cy at runtime) ─────
+int   _DepthWidth;
+int   _DepthHeight;
+float _Fx, _Fy;                   // focal lengths  (pixels)
+float _Cx, _Cy;                   // principal point (pixels)
+
+// ── Surface extract buffers ───────────────────────────────────────────────────
+RWStructuredBuffer<float3> _SurfaceVerts;   // world-space positions
+RWStructuredBuffer<float4> _SurfaceColors;  // RGBA (depth-tinted)
+RWStructuredBuffer<uint>   _Counter;        // [0] = atomic write pointer
+int                        _MaxExtract;     // capacity of surface buffers
+
+#define INVALID_Z 900.0
+
+// ═════════════════════════════════════════════════════════════════════════════
+// CLEAR — reset every voxel to "unobserved free space"
+// ═════════════════════════════════════════════════════════════════════════════
+[numthreads(8, 8, 8)]
+void Clear(uint3 id : SV_DispatchThreadID)
+{
+    if ((int)id.x >= _VolumeRes || (int)id.y >= _VolumeRes || (int)id.z >= _VolumeRes)
+        return;
+    // tsdf = +1  (free space / unobserved),  weight = 0
+    _Volume[id] = float2(1.0, 0.0);
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// INTEGRATE — fuse one depth frame into the TSDF volume
+// One thread per voxel.  Projects the voxel centre into the current depth
+// image, reads the measured depth, computes the signed distance, and blends.
+// ═════════════════════════════════════════════════════════════════════════════
+[numthreads(8, 8, 8)]
+void Integrate(uint3 id : SV_DispatchThreadID)
+{
+    if ((int)id.x >= _VolumeRes || (int)id.y >= _VolumeRes || (int)id.z >= _VolumeRes)
+        return;
+
+    // ── Voxel centre in world space ───────────────────────────────────────────
+    // Voxels are centred at half-integer grid positions relative to the volume.
+    float3 offset   = (float3(id) - _VolumeRes * 0.5 + 0.5) * _VoxelSize;
+    float3 worldPos = _VolumeCenter + offset;
+
+    // ── World → camera space ──────────────────────────────────────────────────
+    float3 camPos = mul(_WorldToCamera, float4(worldPos, 1.0)).xyz;
+
+    // Only integrate voxels the sensor can physically see.
+    if (camPos.z <= 0.01 || camPos.z > 10.0) return;
+
+    // ── Project to depth image pixel ──────────────────────────────────────────
+    // Standard pinhole projection.  Depth image is aligned to colour camera.
+    float u = _Fx * (camPos.x / camPos.z) + _Cx;
+    float v = _Fy * (camPos.y / camPos.z) + _Cy;
+
+    int iu = (int)(u + 0.5);
+    int iv = (int)(v + 0.5);
+    if (iu < 0 || iu >= _DepthWidth || iv < 0 || iv >= _DepthHeight) return;
+
+    // ── Look up measured depth ────────────────────────────────────────────────
+    // VertexBuffer is row-major: index = row * width + col.
+    // z component = depth in metres along the camera Z axis (flipYZ=true applied).
+    float3 measured = _CameraVerts[iv * _DepthWidth + iu];
+    if (measured.z >= INVALID_Z || measured.z <= 0.0) return;
+
+    // ── SDF = measured depth − voxel depth ────────────────────────────────────
+    // Positive: voxel is in free space in front of the visible surface.
+    // Negative: voxel is behind (inside solid geometry).
+    float sdf = measured.z - camPos.z;
+
+    // Voxels well behind the surface give no useful information — skip them.
+    // We keep a rear band of truncDist so thin surfaces are represented.
+    if (sdf < -_TruncDist) return;
+
+    // Normalise into [-1, 1] and clamp.
+    float tsdf = clamp(sdf / _TruncDist, -1.0, 1.0);
+
+    // ── Weighted running average (KinFu eq. 6) ────────────────────────────────
+    float2 current = _Volume[id];
+    float  wOld    = current.g;
+    float  wNew    = min(wOld + 1.0, _MaxWeight);
+    float  tsdfNew = (current.r * wOld + tsdf) / wNew;
+
+    _Volume[id] = float2(tsdfNew, wNew);
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// EXTRACTPOINTS — emit world-space surface points from zero-crossings
+// One thread per voxel.  A "surface voxel" is one where the TSDF sign changes
+// to a neighbour in any of the three positive-axis directions (+X, +Y, +Z).
+// ═════════════════════════════════════════════════════════════════════════════
+[numthreads(8, 8, 8)]
+void ExtractPoints(uint3 id : SV_DispatchThreadID)
+{
+    // Leave a 1-voxel border so neighbour lookups are always in bounds.
+    if ((int)id.x >= _VolumeRes - 1 || (int)id.y >= _VolumeRes - 1 || (int)id.z >= _VolumeRes - 1)
+        return;
+
+    float2 v = _VolumeRead[id];
+
+    // Skip unobserved voxels.
+    if (v.g < 1.0) return;
+
+    // Broad TSDF magnitude cull: only voxels near the surface band are candidates.
+    if (abs(v.r) > 0.6) return;
+
+    // Check sign-change with three positive-axis neighbours.
+    float2 nx = _VolumeRead[id + uint3(1, 0, 0)];
+    float2 ny = _VolumeRead[id + uint3(0, 1, 0)];
+    float2 nz = _VolumeRead[id + uint3(0, 0, 1)];
+
+    bool crossing = (nx.g > 0.0 && sign(v.r) != sign(nx.r)) ||
+                    (ny.g > 0.0 && sign(v.r) != sign(ny.r)) ||
+                    (nz.g > 0.0 && sign(v.r) != sign(nz.r));
+
+    // Also emit voxels very close to zero even without a detected crossing
+    // (handles the case where both neighbours have the same sign but tsdf ≈ 0).
+    if (!crossing && abs(v.r) > 0.15) return;
+
+    // ── World position of this surface voxel ──────────────────────────────────
+    float3 offset   = (float3(id) - _VolumeRes * 0.5 + 0.5) * _VoxelSize;
+    float3 worldPos = _VolumeCenter + offset;
+
+    // ── Atomic slot allocation ────────────────────────────────────────────────
+    uint slot;
+    InterlockedAdd(_Counter[0], 1u, slot);
+    if ((int)slot >= _MaxExtract) return;
+
+    _SurfaceVerts[slot] = worldPos;
+
+    // Color: confidence-weighted cool white.
+    // Blue channel stays high (RealSense brand color).
+    // Green/red fade with distance from zero-crossing for a depth-cue feel.
+    float confidence = saturate(v.g / 20.0);          // 0→dim, 20 obs→full bright
+    float proximity  = 1.0 - abs(v.r);                // 1 at surface, 0 at truncation
+    float brightness = proximity * confidence;
+    _SurfaceColors[slot] = float4(brightness * 0.7,
+                                  brightness * 0.85,
+                                  brightness * 0.7 + confidence * 0.3,
+                                  1.0);
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// CLEAREXTRACTBUFFER — sentinel-fill surface buffers before each extraction
+// Ensures slots not written by ExtractPoints are discarded by the vertex shader.
+// ═════════════════════════════════════════════════════════════════════════════
+[numthreads(256, 1, 1)]
+void ClearExtractBuffer(uint id : SV_DispatchThreadID)
+{
+    if ((int)id >= _MaxExtract) return;
+    _SurfaceVerts[id]  = float3(0.0, 0.0, 999.0);   // z > 900 → discarded by shader
+    _SurfaceColors[id] = float4(0.0, 0.0, 0.0, 0.0);
+}

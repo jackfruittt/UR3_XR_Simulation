@@ -1,122 +1,96 @@
+// Author: Jackson Russell
+
 using UnityEngine;
 using UnityEngine.Rendering;
 using Unity.Robotics.ROSTCPConnector;
 using RosMessageTypes.Sensor;
 using System;
+using System.Collections.Concurrent;
+using System.Threading;
 
 /// GPU-accelerated point cloud renderer for ROS depth and colour image streams.
-/// Author: Jackson Russell
-/// Implementation based on the Intel RealSense Unity SDK approach (RsPointCloudRenderer.cs):
-/// - Utilises MeshTopology.Points for efficient point rendering
-/// - GPU compute shader performs depth pixel to XYZ coordinate conversion
-/// - Reference: librealsense/wrappers/unity/Assets/RealSenseSDK2.0/Scripts/RsPointCloudRenderer.cs
-/// 
-/// Key advantages compared to subscribing to PointCloud2 topics:
-/// - Subscribes to depth and colour IMAGE topics (significantly reduced data: approximately 1.5MB)
-/// - GPU compute shader performs depth to XYZ conversion utilising Intel's optimised SDK
-/// - Eliminates CPU deserialisation bottleneck inherent in PointCloud2 messages
-/// - Performance: Higher
+/// Based on the Intel RealSense Unity SDK (RsPointCloudRenderer.cs).
+///
+/// Design:
+///   - Depth arrives as raw 16UC1 bytes -> LoadRawTextureData -> R16 texture (no CPU loop)
+///   - Colour arrives as rgb8/bgr8 bytes -> LoadRawTextureData -> RGB24 texture
+///   - Compute shader (DepthToPointCloud.compute) converts depth pixels to XYZ on GPU
+///   - Vertex shader reads XYZ+colour from StructuredBuffers via SV_VertexID
+///   - All GPU work dispatched from LateUpdate (main thread only)
+///   - ROS callbacks fire-and-forget: they enqueue/slot bytes and return immediately
+///   - Depth and colour textures sized independently to avoid resize loops
 
 [RequireComponent(typeof(MeshFilter), typeof(MeshRenderer))]
 public class ROSPointCloudRenderer : MonoBehaviour
 {
+    // Inspector
+
     [Header("ROS Topics")]
-    [Tooltip("Depth image topic (raw 16-bit data). Default: /camera/camera/aligned_depth_to_color/image_raw")]
-    public string depthTopic = "/camera/camera/aligned_depth_to_color/image_raw";
+    public string depthTopic               = "camera/camera/depth/image_rect_raw";
+    public string colorTopic               = "camera/camera/color/image_raw";
+    public string colorCompressedTopic     = "/camera/camera/color/image_raw/compressed";
+    public string cameraInfoTopic          = "/camera/camera/color/camera_info";
 
-    [Tooltip("Colour image topic (RGB format). Default: /camera/camera/color/image_raw")]
-    public string colorTopic = "/camera/camera/color/image_raw";
+    [Tooltip("Use compressed JPEG colour stream instead of raw rgb8. At 480x270 raw is ~34 MB/s;\n" +
+             "prefer raw (false) for 90 Hz since JPEG decode blocks the main thread each frame.")]
+    public bool useCompressedColor = false;
 
-    [Tooltip("Camera info topic for live intrinsics. Falls back to Inspector values if not received.")]
-    public string cameraInfoTopic = "/camera/camera/color/camera_info";
-
-    [Header("Camera Intrinsics - RealSense D455 Depth Camera")]
-    [Tooltip("Focal length X component in pixels. RealSense D455 at 640x480: approximately 385")]
-    public float fx = 385.0f;
-
-    [Tooltip("Focal length Y component in pixels. RealSense D455 at 640x480: approximately 385")]
-    public float fy = 385.0f;
-
-    [Tooltip("Principal point X coordinate (typically width/2). RealSense D455: approximately 320")]
-    public float cx = 320.0f;
-
-    [Tooltip("Principal point Y coordinate (typically height/2). RealSense D455: approximately 240")]
-    public float cy = 240.0f;
+    [Header("Camera Intrinsics (Inspector fallback until camera_info arrives)")]
+    public float fx = 385f;
+    public float fy = 385f;
+    public float cx = 320f;
+    public float cy = 240f;
 
     [Header("Settings")]
-    [Tooltip("Image width in pixels. RealSense D455 default: 640")]
-    public int width = 640;
-
-    [Tooltip("Image height in pixels. RealSense D455 default: 480")]
-    public int height = 480;
-
-    [Tooltip("Depth scale factor: 0.001 for millimetre to metre conversion")]
-    public float depthScale = 0.001f;
-
-    [Tooltip("Minimum acceptable depth threshold in metres (filters noise)")]
-    public float minDepth = 0.1f;
-
-    [Tooltip("Maximum acceptable depth threshold in metres")]
-    public float maxDepth = 10.0f;
-
-    [Tooltip("Convert ROS coordinate system (Y-down) to Unity coordinate system (Y-up)")]
-    public bool flipYZ = true;
+    public int   width      = 640;
+    public int   height     = 480;
+    public float depthScale = 0.001f;   // mm -> m
+    public float minDepth   = 0.2f;
+    public float maxDepth   = 10f;
+    [Tooltip("Convert ROS Y-down to Unity Y-up.")]
+    public bool  flipYZ       = true;
+    [Tooltip("Flip the row used to READ the depth texture. Enable when depth is stored " +
+             "top-to-bottom but colour is bottom-to-top (or vice versa), causing depth " +
+             "values to pair with the wrong colour pixels in the point cloud.")]
+    public bool  flipDepthTexY = true;
 
     [Header("Compute Shader")]
-    [Tooltip("Reference to the compute shader asset: DepthToPointCloud.compute")]
     public ComputeShader depthToXYZShader;
 
     [Header("Rendering")]
-    [Tooltip("Point size in pixels")]
-    public float pointSize = 3.0f;
+    [Tooltip("World-space quad half-size per metre of depth. Matches D455 pixel spacing at 640×480: " +
+             "gap ~= z × 0.00234m. Default 0.003 adds ~30% overlap to eliminate visible holes.")]
+    public float quadScale = 0.003f;
 
-    [Header("Debug")]
-    public bool showDebugInfo = true;
+    // Public API
 
-    // ROS TCP connection instance
-    private ROSConnection _ros;
+    public Texture2D  DepthTexture        => depthTexture;
+    public Texture2D  ColorTexture        => colorTexture;
+    public bool       IntrinsicsFromDevice { get; private set; }
+    public string     IntrinsicsSource    => IntrinsicsFromDevice ? "camera_info" : "inspector fallback";
+    public int        ColorWidth          => colorTexture != null ? colorTexture.width  : width;
+    public int        ColorHeight         => colorTexture != null ? colorTexture.height : height;
+    public float      CameraReceiveFPS    { get; private set; }
 
-    // GPU texture resources for depth and colour data
-    private Texture2D depthTexture;
-    private Texture2D colorTexture;
+    // Private: mesh / GPU
 
-    // Compute shader GPU buffers
-    private ComputeBuffer vertexBuffer;
-    private ComputeBuffer colorBuffer;
+    private Mesh           mesh;
+    private MeshFilter     meshFilter;
+    private MeshRenderer   meshRenderer;
+    private Material       _mat;
 
-    // Point cloud mesh components
-    private Mesh mesh;
-    private MeshFilter meshFilter;
-    private MeshRenderer meshRenderer;
+    private ComputeBuffer  vertexBuffer;
+    private ComputeBuffer  colorBuffer;
 
-    // Synchronisation and performance tracking
-    private bool hasDepth = false;
-    private bool hasColor = false;
-    private int frameCount = 0;
-    private float lastUpdateTime = 0f;
+    private Texture2D      depthTexture;
+    private Texture2D      colorTexture;
+    private Texture2D      _compressedStagingTex;
 
-    // One-shot debug flags - log receipt of the first depth and colour message
-    private bool _loggedFirstDepth = false;
-    private bool _loggedFirstColor = false;
+    private int  kernel;
+    private int  _threadGroupsX, _threadGroupsY;
 
-    // Pending resolution change - set by callbacks, applied in Update() to avoid mid-render GPU teardown
-    private bool _pendingResize = false;
-    private int  _pendingWidth  = 0;
-    private int  _pendingHeight = 0;
+    // Private: shader IDs
 
-    // pre-allocated CPU buffers (eliminates per-frame heap allocation)
-    private float[] depthData;
-    private byte[] rgbData;
-
-    // cached kernel index and shader property IDs (avoids per-frame string lookup)
-    private int kernel;
-
-    /// Latest depth texture (RFloat, depth in mm as float per pixel).
-    /// Read by PoseEstimation.SampleDepth for tag depth lookup - no extra subscription needed.
-    public Texture2D DepthTexture => depthTexture;
-
-    /// True once camera_info has been received and intrinsics are device-accurate.
-    public bool IntrinsicsFromDevice { get; private set; } = false;
     private int shaderID_DepthTexture;
     private int shaderID_ColorTexture;
     private int shaderID_VertexBuffer;
@@ -124,32 +98,62 @@ public class ROSPointCloudRenderer : MonoBehaviour
     private int shaderID_flipBGR;
     private int matID_VertexBuffer;
     private int matID_ColorBuffer;
-    private int matID_PointSize;
+    private int matID_QuadScale;
 
-    void Update()
-    {
-        // Apply any pending resolution change at the start of the frame,
-        // before any render work, avoids destroying GPU resources mid-render.
-        if (_pendingResize)
-        {
-            _pendingResize = false;
-            ReinitializeForResolution(_pendingWidth, _pendingHeight);
-        }
-    }
+    // Private: ROS thread -> main thread handoff
+
+    // Depth: bounded queue absorbs burst delivery without blocking ROS thread.
+    private ConcurrentQueue<byte[]> _depthQueue = new ConcurrentQueue<byte[]>();
+    private const int depthBufferCap = 3;
+
+    // Colour raw: lockless single-slot (only newest frame matters).
+    private byte[] _colorSlot;
+    private int    _colorSlotVer;
+    private int    _colorReadVer = -1;
+    private bool   _colorFlipBGR;
+
+    // Colour compressed: same single-slot pattern.
+    private byte[] _compressedSlot;
+    private int    _compressedSlotVer;
+    private int    _compressedReadVer = -1;
+
+    // Pending resize – depth and colour sized independently.
+    // Only depth resize rebuilds the mesh/buffers; colour resize only swaps the Texture2D.
+    private volatile bool _pendingDepthResize;
+    private int  _pendingDepthW, _pendingDepthH;
+
+    private volatile bool _pendingColorResize;
+    private int  _pendingColorW, _pendingColorH;
+    private int  _colorWidth, _colorHeight;
+
+    // Pending intrinsics from camera_info (set on ROS thread, applied on main thread).
+    private volatile bool  _pendingIntrinsics;
+    private float _pendingFx, _pendingFy, _pendingCx, _pendingCy;
+
+    // State
+    private bool   hasDepth, hasColor;
+    private bool   _loggedFirstDepth, _loggedFirstColor;
+
+    // Receive-rate counter - incremented on the ROS thread, read on the main thread.
+    // Interlocked.Increment is the only safe cross-thread primitive here; no lock needed.
+    // We count depth frames (one per sensor cycle) over a 0.5s window to get true Hz.
+    private int    _depthFrameCount;          // accumulates since last window reset
+    private float  _fpsWindowStart = -1f;     // Time.realtimeSinceStartup of window start
+
+    // Lifecycle
 
     void Start()
     {
-        _ros = ROSConnection.GetOrCreateInstance();
-        if (_ros == null)
+        var ros = ROSConnection.GetOrCreateInstance();
+        if (ros == null)
         {
-            Debug.LogError("[ROSPointCloudRenderer] Failed to establish ROS connection.");
+            Debug.LogError("[ROSPointCloudRenderer] No ROS connection.");
             enabled = false;
             return;
         }
-
         if (depthToXYZShader == null)
         {
-            Debug.LogError("[ROSPointCloudRenderer] Compute shader not assigned. Please assign DepthToPointCloud.compute in the Inspector.");
+            Debug.LogError("[ROSPointCloudRenderer] Compute shader not assigned.");
             enabled = false;
             return;
         }
@@ -158,295 +162,428 @@ public class ROSPointCloudRenderer : MonoBehaviour
         CacheShaderIDs();
         SetStaticShaderParameters();
 
-        string depthTopicTrimmed = depthTopic.Trim();
-        string colorTopicTrimmed = colorTopic.Trim();
+        // Target 90 fps to match the D455 sensor rate.
+        // Must be set before the first frame is rendered; Start() is early enough.
+        Application.targetFrameRate = 90;
 
-        _ros.Subscribe<ImageMsg>(depthTopicTrimmed, OnDepthImageReceived);
-        _ros.Subscribe<ImageMsg>(colorTopicTrimmed, OnColorImageReceived);
-        _ros.Subscribe<CameraInfoMsg>(cameraInfoTopic.Trim(), OnCameraInfoReceived);
+        ros.Subscribe<ImageMsg>(depthTopic.Trim(), OnDepthImageReceived);
+        ros.Subscribe<CameraInfoMsg>(cameraInfoTopic.Trim(), OnCameraInfoReceived);
 
-        Debug.Log($"[ROSPointCloudRenderer] Subscribed to depth: {depthTopicTrimmed}");
-        Debug.Log($"[ROSPointCloudRenderer] Subscribed to color: {colorTopicTrimmed}");
-        Debug.Log($"[ROSPointCloudRenderer] Subscribed to camera_info: {cameraInfoTopic.Trim()} (using Inspector fallback until received)");
-        Debug.Log($"[ROSPointCloudRenderer] Fallback intrinsics: fx={fx}, fy={fy}, cx={cx}, cy={cy}");
+        if (useCompressedColor)
+            ros.Subscribe<CompressedImageMsg>(colorCompressedTopic.Trim(), OnCompressedColorReceived);
+        else
+            ros.Subscribe<ImageMsg>(colorTopic.Trim(), OnColorImageReceived);
+
+        Debug.Log($"[ROSPointCloudRenderer] Started. depth={depthTopic.Trim()}  " +
+                  $"color={(useCompressedColor ? colorCompressedTopic.Trim() : colorTopic.Trim())}  " +
+                  $"intrinsics={IntrinsicsSource}");
     }
 
-    /// Initialises mesh with point topology utilising the Intel RsPointCloudRenderer pattern.
-    /// Reference implementation: RsPointCloudRenderer.cs ResetMesh() method.
-    /// Also pre-allocates CPU-side buffers to eliminate per-frame heap allocation.
+    void Update()
+    {
+        // Receive FPS
+
+        float now2 = Time.realtimeSinceStartup;
+        if (_fpsWindowStart < 0f) _fpsWindowStart = now2;
+        float elapsed = now2 - _fpsWindowStart;
+        if (elapsed >= 0.5f)
+        {
+            int count = Interlocked.Exchange(ref _depthFrameCount, 0);
+            float measured = count / elapsed;
+            CameraReceiveFPS = CameraReceiveFPS <= 0f ? measured : Mathf.Lerp(CameraReceiveFPS, measured, 0.3f);
+            _fpsWindowStart = now2;
+        }
+
+        // Apply resolution changes at frame start, before any GPU work this tick.
+
+        if (_pendingDepthResize)
+        {
+            _pendingDepthResize = false;
+            ReinitDepthResolution(_pendingDepthW, _pendingDepthH);
+        }
+
+        if (_pendingColorResize)
+        {
+            _pendingColorResize = false;
+            ReinitColorTexture(_pendingColorW, _pendingColorH);
+        }
+
+        // Apply intrinsics received from camera_info on the ROS thread.
+        if (_pendingIntrinsics)
+        {
+            _pendingIntrinsics = false;
+            fx = _pendingFx; fy = _pendingFy; cx = _pendingCx; cy = _pendingCy;
+            depthToXYZShader.SetFloat("invFx",      1f / fx);
+            depthToXYZShader.SetFloat("invFy",      1f / fy);
+            depthToXYZShader.SetFloat("cx_over_fx", cx / fx);
+            depthToXYZShader.SetFloat("cy_over_fy", cy / fy);
+            IntrinsicsFromDevice = true;
+            Debug.Log($"[ROSPointCloudRenderer] Intrinsics from camera_info: fx={fx:F1} fy={fy:F1} cx={cx:F1} cy={cy:F1}");
+        }
+    }
+
+    void LateUpdate()
+    {
+        // Drain entire depth queue, upload only the newest frame.
+        // Draining all prevents the queue from backing up when TCP delivers bursts;
+        // uploading only the latest keeps the point cloud current (no stale frames).
+        byte[] latestDepth = null;
+        while (_depthQueue.TryDequeue(out byte[] depthBytes))
+            latestDepth = depthBytes;
+        if (latestDepth != null)
+        {
+            // R16 unsigned normalised: LoadRawTextureData accepts raw uint16 bytes directly.
+            // Compute shader reads [0,1] and multiplies by 65535 to recover millimetres.
+            depthTexture.LoadRawTextureData(latestDepth);
+            depthTexture.Apply(false, false);
+            hasDepth = true;
+        }
+
+        // Upload colour
+        if (useCompressedColor)
+        {
+            int ver = _compressedSlotVer;
+            if (ver != _compressedReadVer)
+            {
+                byte[] data = Interlocked.Exchange(ref _compressedSlot, null);
+                _compressedReadVer = ver;
+                if (data != null) DecodeCompressed(data);
+            }
+        }
+        else
+        {
+            int ver = _colorSlotVer;
+            if (ver != _colorReadVer)
+            {
+                byte[] data = Interlocked.Exchange(ref _colorSlot, null);
+                _colorReadVer = ver;
+                if (data != null)
+                {
+                    colorTexture.LoadRawTextureData(data);
+                    colorTexture.Apply(false, false);
+                    depthToXYZShader.SetInt(shaderID_flipBGR, _colorFlipBGR ? 1 : 0);
+                    hasColor = true;
+                }
+            }
+        }
+
+        if (hasDepth && hasColor)
+            DispatchCompute();
+    }
+
+    // Compute dispatch
+
+    void DispatchCompute()
+    {
+        hasDepth = false;
+        hasColor = false;
+
+        depthToXYZShader.Dispatch(kernel, _threadGroupsX, _threadGroupsY, 1);
+    }
+
+    // Initialisation
+
     void InitializeMesh()
     {
-        meshFilter = GetComponent<MeshFilter>();
+        meshFilter   = GetComponent<MeshFilter>();
         meshRenderer = GetComponent<MeshRenderer>();
 
         int pointCount = width * height;
 
-        mesh = new Mesh
-        {
-            indexFormat = IndexFormat.UInt32
-        };
-        mesh.MarkDynamic();
-
-        Vector3[] vertices = new Vector3[pointCount];
-
-        int[] indices = new int[pointCount];
+        mesh = new Mesh { indexFormat = IndexFormat.UInt32 };
+        // MeshTopology.Triangles: each point expands into 4 vertices / 2 triangles.
+        int vertCount  = pointCount * 4;
+        int indexCount = pointCount * 6;
+        int[] indices  = new int[indexCount];
         for (int i = 0; i < pointCount; i++)
-            indices[i] = i;
-
-        Vector2[] uvs = new Vector2[pointCount];
-        for (int y = 0; y < height; y++)
         {
-            for (int x = 0; x < width; x++)
-            {
-                int idx = y * width + x;
-                uvs[idx] = new Vector2((float)x / width, (float)y / height);
-            }
+            int v   = i * 4;
+            int idx = i * 6;
+            // Two triangles per quad (CCW winding): TL-BL-TR, BL-BR-TR.
+            indices[idx + 0] = v + 0; // TL
+            indices[idx + 1] = v + 1; // BL
+            indices[idx + 2] = v + 2; // TR
+            indices[idx + 3] = v + 1; // BL
+            indices[idx + 4] = v + 3; // BR
+            indices[idx + 5] = v + 2; // TR
         }
-
-        mesh.vertices = vertices;
-        mesh.uv = uvs;
-        mesh.SetIndices(indices, MeshTopology.Points, 0, false);
-        mesh.bounds = new Bounds(Vector3.zero, Vector3.one * 20f);
+        mesh.vertices  = new Vector3[vertCount];    // sets vertex count; values unused on GPU
+        mesh.SetIndices(indices, MeshTopology.Triangles, 0, false);
+        mesh.bounds = new Bounds(Vector3.zero, Vector3.one * 1000f);
+        mesh.UploadMeshData(true);                  // free CPU copy - immutable index/vertex data
 
         meshFilter.mesh = mesh;
 
-        vertexBuffer = new ComputeBuffer(pointCount, sizeof(float) * 3);
+        // float4 stride (16 bytes) avoids the Vulkan/SPIR-V std430 alignment issue where
+        // StructuredBuffer<float3> generates ArrayStride=16 but a stride=12 ComputeBuffer
+        // would shift every element past index 0 by 4 bytes, corrupting far-field depth.
+        // The w component carries a validity flag: w=1 valid, w=0 invalid.
+        vertexBuffer = new ComputeBuffer(pointCount, sizeof(float) * 4);
         colorBuffer  = new ComputeBuffer(pointCount, sizeof(float) * 4);
 
-        depthTexture = new Texture2D(width, height, TextureFormat.RFloat, false);
+        // R16 unsigned normalised: byte[] from ROS is already raw uint16 data.
+        // linear=true: depth is NOT a colour texture and must never have sRGB gamma applied.
+        // Intel RealSense Unity SDK (RsStreamTextureRenderer.cs) always uses linear=true for
+        // non-colour streams (Stream != Color && Stream != Infrared).
+        depthTexture = new Texture2D(width, height, TextureFormat.R16, false, true);
         depthTexture.filterMode = FilterMode.Point;
 
-        colorTexture = new Texture2D(width, height, TextureFormat.RGB24, false);
+        int cw = _colorWidth  > 0 ? _colorWidth  : width;
+        int ch = _colorHeight > 0 ? _colorHeight : height;
+        // Colour texture: linear=false so Unity handles sRGB correctly for display.
+        colorTexture = new Texture2D(cw, ch, TextureFormat.RGB24, false, false);
         colorTexture.filterMode = FilterMode.Point;
 
-        // pre-allocate reusable CPU buffers
-        depthData = new float[pointCount];
-        rgbData   = new byte[pointCount * 3];
+        if (useCompressedColor && _compressedStagingTex == null)
+            _compressedStagingTex = new Texture2D(2, 2, TextureFormat.RGBA32, false);
 
-        Debug.Log($"[ROSPointCloudRenderer] Mesh initialised: {pointCount} points ({width}x{height})");
+        _mat = meshRenderer.material;
+        meshRenderer.shadowCastingMode          = ShadowCastingMode.Off;
+        meshRenderer.receiveShadows             = false;
+        meshRenderer.reflectionProbeUsage       = ReflectionProbeUsage.Off;
+        meshRenderer.lightProbeUsage            = LightProbeUsage.Off;
+        meshRenderer.motionVectorGenerationMode = MotionVectorGenerationMode.ForceNoMotion;
     }
 
-    /// Tears down GPU resources and rebuilds at a new resolution.
-    /// Called automatically when the first depth or colour message arrives at a different size
-    /// than the Inspector defaults, handles cameras streaming at 720p, 1080p, etc.
-    void ReinitializeForResolution(int newWidth, int newHeight)
-    {
-        // Release old GPU buffers
-        vertexBuffer?.Release();
-        colorBuffer?.Release();
-
-        if (depthTexture != null) Destroy(depthTexture);
-        if (colorTexture != null) Destroy(colorTexture);
-        if (mesh != null)         Destroy(mesh);
-
-        // Update dimensions - SetStaticShaderParameters reads these fields
-        width  = newWidth;
-        height = newHeight;
-
-        InitializeMesh();
-        // SetStaticShaderParameters re-binds the new buffers to the kernel and pushes new dimensions
-        SetStaticShaderParameters();
-
-        // Reset one-shot flags so confirmation logs fire again at the new resolution
-        _loggedFirstDepth = false;
-        _loggedFirstColor = false;
-        frameCount = 0;
-        hasDepth = false;
-        hasColor = false;
-
-        Debug.Log($"[ROSPointCloudRenderer] Reinitialised for {newWidth}x{newHeight}");
-    }
-
-    /// Caches all shader property and kernel IDs once at startup.
-    /// Avoids repeated string hashing inside the per-frame hot path.
     void CacheShaderIDs()
     {
         kernel = depthToXYZShader.FindKernel("DepthToXYZ");
 
-        // Compute shader inputs
         shaderID_DepthTexture = Shader.PropertyToID("DepthTexture");
         shaderID_ColorTexture = Shader.PropertyToID("ColorTexture");
         shaderID_VertexBuffer = Shader.PropertyToID("VertexBuffer");
         shaderID_ColorBuffer  = Shader.PropertyToID("ColorBuffer");
         shaderID_flipBGR      = Shader.PropertyToID("flipBGR");
 
-        // Material buffer bindings
         matID_VertexBuffer = Shader.PropertyToID("_VertexBuffer");
         matID_ColorBuffer  = Shader.PropertyToID("_ColorBuffer");
-        matID_PointSize    = Shader.PropertyToID("_PointSize");
+        matID_QuadScale    = Shader.PropertyToID("_QuadScale");
     }
 
-    /// Uploads shader parameters that never change after startup (intrinsics, scale, dimensions).
     void SetStaticShaderParameters()
     {
-        depthToXYZShader.SetFloat("fx",         fx);
-        depthToXYZShader.SetFloat("fy",         fy);
-        depthToXYZShader.SetFloat("cx",         cx);
-        depthToXYZShader.SetFloat("cy",         cy);
+        // Compute shader uses precomputed reciprocals to avoid per-thread division on GPU.
+        depthToXYZShader.SetFloat("invFx",      1f / fx);
+        depthToXYZShader.SetFloat("invFy",      1f / fy);
+        depthToXYZShader.SetFloat("cx_over_fx", cx / fx);
+        depthToXYZShader.SetFloat("cy_over_fy", cy / fy);
         depthToXYZShader.SetFloat("depthScale", depthScale);
         depthToXYZShader.SetFloat("minDepth",   minDepth);
         depthToXYZShader.SetFloat("maxDepth",   maxDepth);
-        depthToXYZShader.SetInt("width",        width);
-        depthToXYZShader.SetInt("height",       height);
-        depthToXYZShader.SetBool("flipYZ",      flipYZ);
+        depthToXYZShader.SetInt  ("width",      width);
+        depthToXYZShader.SetInt  ("height",     height);
+        depthToXYZShader.SetInt  ("flipYZ",        flipYZ        ? 1 : 0);
+        depthToXYZShader.SetInt  ("flipDepthTexY", flipDepthTexY ? 1 : 0);
 
-        // Bind output buffers once, doesn't change per frame
-        depthToXYZShader.SetBuffer(kernel, shaderID_VertexBuffer, vertexBuffer);
-        depthToXYZShader.SetBuffer(kernel, shaderID_ColorBuffer,  colorBuffer);
+        int cw = colorTexture != null ? colorTexture.width  : width;
+        int ch = colorTexture != null ? colorTexture.height : height;
+        depthToXYZShader.SetInt  ("colorWidth",   cw);
+        depthToXYZShader.SetInt  ("colorHeight",  ch);
+        depthToXYZShader.SetFloat("colorScaleX", (float)cw / width);
+        depthToXYZShader.SetFloat("colorScaleY", (float)ch / height);
+
+        // Bind buffers and textures once - only their contents change per frame.
+        depthToXYZShader.SetBuffer (kernel, shaderID_VertexBuffer, vertexBuffer);
+        depthToXYZShader.SetBuffer (kernel, shaderID_ColorBuffer,  colorBuffer);
+        depthToXYZShader.SetTexture(kernel, shaderID_DepthTexture, depthTexture);
+        depthToXYZShader.SetTexture(kernel, shaderID_ColorTexture, colorTexture);
+
+        _mat.SetBuffer(matID_VertexBuffer, vertexBuffer);
+        _mat.SetBuffer(matID_ColorBuffer,  colorBuffer);
+        _mat.SetFloat (matID_QuadScale,    quadScale);
+
+        // Cache thread group counts (16x16 = 256 threads per group, fills a GPU wavefront).
+        _threadGroupsX = Mathf.CeilToInt(width  / 16f);
+        _threadGroupsY = Mathf.CeilToInt(height / 16f);
     }
 
-    /// Receive D455 intrinsics from camera_info and updates the compute shader.
-    /// The K matrix is row-major 3x3: [fx, 0, cx, 0, fy, cy, 0, 0, 1]
-    void OnCameraInfoReceived(CameraInfoMsg msg)
+    // Resize helpers
+
+    /// Rebuilds the full mesh, buffers, and depth texture for a new depth resolution.
+    /// Called on the main thread from Update().
+    void ReinitDepthResolution(int w, int h)
     {
-        float newFx = (float)msg.k[0];
-        float newFy = (float)msg.k[4];
-        float newCx = (float)msg.k[2];
-        float newCy = (float)msg.k[5];
+        vertexBuffer?.Release();
+        colorBuffer?.Release();
+        if (depthTexture != null) Destroy(depthTexture);
+        if (mesh != null)         Destroy(mesh);
 
-        // Only update and re-push if values have changed (avoids unnecessary shader uploads)
-        if (Mathf.Approximately(newFx, fx) && Mathf.Approximately(newFy, fy) &&
-            Mathf.Approximately(newCx, cx) && Mathf.Approximately(newCy, cy))
-            return;
+        width  = w;
+        height = h;
 
-        fx = newFx;
-        fy = newFy;
-        cx = newCx;
-        cy = newCy;
+        InitializeMesh();
+        CacheShaderIDs();
+        SetStaticShaderParameters();
 
-        // Re-push to compute shader - these are "static" only until camera_info arrives
-        depthToXYZShader.SetFloat("fx", fx);
-        depthToXYZShader.SetFloat("fy", fy);
-        depthToXYZShader.SetFloat("cx", cx);
-        depthToXYZShader.SetFloat("cy", cy);
+        hasDepth = hasColor = false;
+        _loggedFirstDepth = false;
+        _depthQueue = new ConcurrentQueue<byte[]>();
 
-        IntrinsicsFromDevice = true;
-        Debug.Log($"[ROSPointCloudRenderer] Intrinsics updated from camera_info: fx={fx:F2} fy={fy:F2} cx={cx:F2} cy={cy:F2}");
+        Debug.Log($"[ROSPointCloudRenderer] Depth resolution reinit -> {w}×{h}");
     }
+
+    /// Creates a new colour texture for a different colour resolution.
+    /// Does NOT affect the mesh, buffers, or depth pipeline.
+    /// Called on the main thread from Update().
+    void ReinitColorTexture(int w, int h)
+    {
+        if (colorTexture != null) Destroy(colorTexture);
+        _colorWidth  = w;
+        _colorHeight = h;
+        colorTexture = new Texture2D(w, h, TextureFormat.RGB24, false, false);
+        colorTexture.filterMode = FilterMode.Point;
+
+        depthToXYZShader.SetInt  ("colorWidth",   w);
+        depthToXYZShader.SetInt  ("colorHeight",  h);
+        depthToXYZShader.SetFloat("colorScaleX", (float)w / width);
+        depthToXYZShader.SetFloat("colorScaleY", (float)h / height);
+        depthToXYZShader.SetTexture(kernel, shaderID_ColorTexture, colorTexture);
+
+        _colorSlotVer  = 0;
+        _colorReadVer  = -1;
+        _loggedFirstColor = false;
+        hasColor = false;
+
+        Debug.Log($"[ROSPointCloudRenderer] Colour texture reinit -> {w}×{h}");
+    }
+
+    // ROS callbacks (run on background threads - NO Unity/GPU API calls here)
 
     void OnDepthImageReceived(ImageMsg msg)
     {
         if (msg.encoding != "16UC1" && msg.encoding != "mono16")
         {
-            Debug.LogError($"[ROSPointCloudRenderer] Depth callback received incorrect encoding: {msg.encoding} (expected 16UC1 or mono16).");
+            Debug.LogError($"[ROSPointCloudRenderer] Unexpected depth encoding: '{msg.encoding}' (expected 16UC1)");
             return;
         }
 
-        if (msg.width != (uint)width || msg.height != (uint)height)
+        if ((int)msg.width != width || (int)msg.height != height)
         {
-            if (!_pendingResize)
+            // Schedule depth resize on the main thread. Only latch the first mismatch.
+            if (!_pendingDepthResize)
             {
-                Debug.LogWarning($"[ROSPointCloudRenderer] Depth resolution changed: {width}x{height} -> {msg.width}x{msg.height}. Queuing reinitialise.");
-                _pendingWidth  = (int)msg.width;
-                _pendingHeight = (int)msg.height;
-                _pendingResize = true;
+                _pendingDepthW = (int)msg.width;
+                _pendingDepthH = (int)msg.height;
+                _pendingDepthResize = true;
             }
-            return; // skip this frame - reinit happens next Update()
+            return;
         }
 
-        int pixelCount = width * height;
+        // Enqueue raw bytes: main thread uploads without any CPU conversion.
+        _depthQueue.Enqueue(msg.data);
+        while (_depthQueue.Count > depthBufferCap)
+            _depthQueue.TryDequeue(out _);
 
-        // Extract 16-bit depth values into pre-allocated float array (no allocation here)
-        for (int i = 0; i < pixelCount; i++)
-        {
-            ushort depthMM = (ushort)(msg.data[i * 2] | (msg.data[i * 2 + 1] << 8));
-            depthData[i] = depthMM;
-        }
+        // Count every received frame for the receive-rate measurement in Update().
+        Interlocked.Increment(ref _depthFrameCount);
 
-        depthTexture.SetPixelData(depthData, 0);
-        depthTexture.Apply(false, false); // Suppress mipmap generation
-
-        hasDepth = true;
         if (!_loggedFirstDepth)
         {
-            // Debug.Log($"[ROSPointCloudRenderer] Depth received: {msg.width}x{msg.height}, encoding: {msg.encoding}");
+            Debug.Log($"[ROSPointCloudRenderer] First depth frame: {msg.width}×{msg.height} {msg.encoding}");
             _loggedFirstDepth = true;
         }
-
-        if (hasColor)
-            UpdatePointCloud();
     }
 
     void OnColorImageReceived(ImageMsg msg)
     {
-        if (msg.encoding != "rgb8" && msg.encoding != "bgr8")
+        if (msg.encoding != "rgb8" && msg.encoding != "bgr8") return;
+
+        if ((int)msg.width != _colorWidth || (int)msg.height != _colorHeight)
         {
-            // Debug.LogError($"[ROSPointCloudRenderer] Colour callback received incorrect encoding: {msg.encoding} (expected rgb8 or bgr8).");
+            // Schedule an independent colour-only resize. Does NOT touch depth mesh/buffers.
+            if (!_pendingColorResize)
+            {
+                _pendingColorW = (int)msg.width;
+                _pendingColorH = (int)msg.height;
+                _pendingColorResize = true;
+            }
+            // Track new expected size so subsequent frames match.
+            _colorWidth  = (int)msg.width;
+            _colorHeight = (int)msg.height;
             return;
         }
 
-        if (msg.width != (uint)width || msg.height != (uint)height)
-        {
-            if (!_pendingResize)
-            {
-                Debug.LogWarning($"[ROSPointCloudRenderer] Colour resolution changed: {width}x{height} -> {msg.width}x{msg.height}. Queuing reinitialise.");
-                _pendingWidth  = (int)msg.width;
-                _pendingHeight = (int)msg.height;
-                _pendingResize = true;
-            }
-            return; // skip this frame - reinit happens next Update()
-        }
+        _colorFlipBGR = msg.encoding == "bgr8";
+        Interlocked.Exchange(ref _colorSlot, msg.data);
+        Interlocked.Increment(ref _colorSlotVer);
 
-        // Load raw bytes directly regardless of channel order; the compute shader swizzles if needed.
-        colorTexture.LoadRawTextureData(msg.data);
-        colorTexture.Apply(false, false);
-
-        // Inform compute shader whether to swizzle BGR->RGB (GPU swizzle is effectively free)
-        depthToXYZShader.SetBool(shaderID_flipBGR, msg.encoding == "bgr8");
-
-        hasColor = true;
         if (!_loggedFirstColor)
         {
-            // Debug.Log($"[ROSPointCloudRenderer] Colour received: {msg.width}x{msg.height}, encoding: {msg.encoding}");
+            Debug.Log($"[ROSPointCloudRenderer] First colour frame: {msg.width}×{msg.height} {msg.encoding}");
             _loggedFirstColor = true;
         }
     }
 
-    /// Executes compute shader to perform depth-to-XYZ conversion.
-    /// Buffers are passed directly to the material, no GPU readback occurs.
-    void UpdatePointCloud()
+    void OnCompressedColorReceived(CompressedImageMsg msg)
     {
-        if (!hasDepth || !hasColor)
-            return;
+        if (msg.data == null || msg.data.Length == 0) return;
+        Interlocked.Exchange(ref _compressedSlot, msg.data);
+        Interlocked.Increment(ref _compressedSlotVer);
 
-        hasDepth = false;
-        hasColor = false;
-
-        // Bind per-frame input textures (these change every frame)
-        depthToXYZShader.SetTexture(kernel, shaderID_DepthTexture, depthTexture);
-        depthToXYZShader.SetTexture(kernel, shaderID_ColorTexture, colorTexture);
-
-        // Dispatch compute shader, output written directly to GPU buffers
-        int threadGroupsX = Mathf.CeilToInt(width  / 8.0f);
-        int threadGroupsY = Mathf.CeilToInt(height / 8.0f);
-        depthToXYZShader.Dispatch(kernel, threadGroupsX, threadGroupsY, 1);
-
-        // Vertex shader reads positions and colours from these buffers via SV_VertexID.
-        meshRenderer.material.SetBuffer(matID_VertexBuffer, vertexBuffer);
-        meshRenderer.material.SetBuffer(matID_ColorBuffer,  colorBuffer);
-        meshRenderer.material.SetFloat(matID_PointSize, pointSize);
-
-        // if (frameCount == 0)
-        //     // Debug.Log("[ROSPointCloudRenderer] UpdatePointCloud dispatched (first frame)");
-
-        // // Performance diagnostics
-        // frameCount++;
-        // if (showDebugInfo && Time.time - lastUpdateTime > 2.0f)
-        // {
-        //     float fps = frameCount / (Time.time - lastUpdateTime);
-        //     Debug.Log($"[ROSPointCloudRenderer] Performance: {fps:F1} FPS");
-        //     frameCount = 0;
-        //     lastUpdateTime = Time.time;
-        // }
+        if (!_loggedFirstColor)
+        {
+            Debug.Log($"[ROSPointCloudRenderer] First compressed colour: fmt={msg.format} bytes={msg.data.Length}");
+            _loggedFirstColor = true;
+        }
     }
+
+    void OnCameraInfoReceived(CameraInfoMsg msg)
+    {
+        float nFx = (float)msg.k[0], nFy = (float)msg.k[4];
+        float nCx = (float)msg.k[2], nCy = (float)msg.k[5];
+        if (Mathf.Approximately(nFx, fx) && Mathf.Approximately(nFy, fy) &&
+            Mathf.Approximately(nCx, cx) && Mathf.Approximately(nCy, cy)) return;
+        _pendingFx = nFx; _pendingFy = nFy; _pendingCx = nCx; _pendingCy = nCy;
+        _pendingIntrinsics = true;
+    }
+
+    // Compressed JPEG decode (main thread only)
+    void DecodeCompressed(byte[] data)
+    {
+        try
+        {
+            _compressedStagingTex.LoadImage(data);
+
+            bool rebuild = _compressedStagingTex.width  != _colorWidth
+                        || _compressedStagingTex.height != _colorHeight
+                        || colorTexture == null
+                        || colorTexture.format != _compressedStagingTex.format;
+
+            if (rebuild)
+            {
+                _colorWidth  = _compressedStagingTex.width;
+                _colorHeight = _compressedStagingTex.height;
+                if (colorTexture != null) Destroy(colorTexture);
+                colorTexture = new Texture2D(_colorWidth, _colorHeight, _compressedStagingTex.format, false, false);
+                colorTexture.filterMode = FilterMode.Point;
+                depthToXYZShader.SetInt  ("colorWidth",   _colorWidth);
+                depthToXYZShader.SetInt  ("colorHeight",  _colorHeight);
+                depthToXYZShader.SetFloat("colorScaleX", (float)_colorWidth  / width);
+                depthToXYZShader.SetFloat("colorScaleY", (float)_colorHeight / height);
+                depthToXYZShader.SetTexture(kernel, shaderID_ColorTexture, colorTexture);
+                Debug.Log($"[ROSPointCloudRenderer] Colour texture rebuilt: {_colorWidth}×{_colorHeight} {_compressedStagingTex.format}");
+            }
+
+            Graphics.CopyTexture(_compressedStagingTex, colorTexture);
+            depthToXYZShader.SetInt(shaderID_flipBGR, false ? 1 : 0); // JPEG always RGB
+            hasColor = true;
+        }
+        catch (Exception e)
+        {
+            Debug.LogError($"[ROSPointCloudRenderer] Compressed decode failed: {e.Message}");
+        }
+    }
+
+    // Cleanup
 
     void OnDestroy()
     {
         vertexBuffer?.Release();
         colorBuffer?.Release();
-
-        if (depthTexture != null) Destroy(depthTexture);
-        if (colorTexture != null) Destroy(colorTexture);
-        if (mesh != null)         Destroy(mesh);
+        if (depthTexture != null)          Destroy(depthTexture);
+        if (colorTexture != null)          Destroy(colorTexture);
+        if (_compressedStagingTex != null) Destroy(_compressedStagingTex);
+        if (mesh != null)                  Destroy(mesh);
+        if (_mat != null)                  Destroy(_mat);
     }
 }

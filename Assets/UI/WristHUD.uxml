@@ -1,0 +1,117 @@
+<ui:UXML xmlns:ui="UnityEngine.UIElements" xmlns:uie="UnityEditor.UIElements" editor-extension-mode="False">
+    <Style src="WristHUD.uss"/>
+    <!--
+        WristHUD.uxml — world-space wrist panel.
+        Rendered into a RenderTexture (600×800) by WristHUDController and
+        displayed on a physical quad parented to the Left Controller.
+
+        Element names are intentionally identical to HUD.uxml so Stage-2
+        data binding can share query code.
+    -->
+    <ui:VisualElement name="wrist-root" class="wrist-root">
+        <ui:VisualElement name="tab-bar" class="tab-bar">
+            <ui:Button name="tab-robot" text="ROBOT" class="tab-btn tab-active"/>
+            <ui:Button name="tab-calib" text="CALIBRATION" class="tab-btn"/>
+        </ui:VisualElement>
+        <ui:VisualElement name="panel-robot" class="panel">
+            <ui:VisualElement class="section">
+                <ui:Label text="KINEMATICS" class="section-header"/>
+                <ui:VisualElement class="row">
+                    <ui:Label text="EEF" class="row-label"/>
+                    <ui:Label name="val-eef" text="--" class="row-value val-blue"/>
+                </ui:VisualElement>
+                <ui:VisualElement class="row">
+                    <ui:Label text="TARGET" class="row-label"/>
+                    <ui:Label name="val-target" text="--" class="row-value"/>
+                </ui:VisualElement>
+                <ui:VisualElement class="row">
+                    <ui:Label text="ERROR" class="row-label"/>
+                    <ui:Label name="val-error" text="--" class="row-value"/>
+                </ui:VisualElement>
+            </ui:VisualElement>
+            <ui:VisualElement class="divider"/>
+            <ui:VisualElement class="section">
+                <ui:Label text="IK SOLVER" class="section-header"/>
+                <ui:VisualElement class="row">
+                    <ui:Label text="MODE" class="row-label"/>
+                    <ui:Label name="val-ik-mode" text="--" class="row-value"/>
+                </ui:VisualElement>
+                <ui:VisualElement class="row">
+                    <ui:Label text="MANIP" class="row-label"/>
+                    <ui:Label name="val-manip" text="--" class="row-value"/>
+                </ui:VisualElement>
+                <ui:VisualElement class="row">
+                    <ui:Label text="PEAK VEL" class="row-label"/>
+                    <ui:Label name="val-vel" text="--" class="row-value"/>
+                </ui:VisualElement>
+                <ui:VisualElement class="row">
+                    <ui:Label text="STATE" class="row-label"/>
+                    <ui:Label name="val-state" text="IDLE" class="row-value"/>
+                </ui:VisualElement>
+            </ui:VisualElement>
+            <ui:VisualElement class="divider"/>
+            <ui:VisualElement class="section">
+                <ui:Label text="JOINTS (deg)" class="section-header"/>
+                <ui:VisualElement class="row">
+                    <ui:Label text="J1-J3" class="row-label"/>
+                    <ui:Label name="val-joints-abc" text="--" class="row-value"/>
+                </ui:VisualElement>
+                <ui:VisualElement class="row">
+                    <ui:Label text="J4-J6" class="row-label"/>
+                    <ui:Label name="val-joints-def" text="--" class="row-value"/>
+                </ui:VisualElement>
+            </ui:VisualElement>
+            <ui:VisualElement class="divider"/>
+            <ui:VisualElement class="section">
+                <ui:Label text="REALSENSE" class="section-header"/>
+                <ui:VisualElement class="row">
+                    <ui:Label text="RATE" class="row-label"/>
+                    <ui:Label name="val-cam-fps" text="--" class="row-value"/>
+                </ui:VisualElement>
+                <ui:VisualElement class="row">
+                    <ui:Label text="RES" class="row-label"/>
+                    <ui:Label name="val-cam-res" text="--" class="row-value"/>
+                </ui:VisualElement>
+                <ui:VisualElement class="row">
+                    <ui:Label text="K" class="row-label"/>
+                    <ui:Label name="val-cam-k" text="--" class="row-value"/>
+                </ui:VisualElement>
+            </ui:VisualElement>
+        </ui:VisualElement>
+        <ui:VisualElement name="panel-calib" class="panel panel-hidden">
+            <ui:VisualElement class="section">
+                <ui:Label text="HAND-EYE CALIBRATION" class="section-header"/>
+                <ui:Label name="val-calib-status" text="No calibration saved" class="row-value calib-status"/>
+            </ui:VisualElement>
+            <ui:VisualElement class="divider"/>
+            <ui:VisualElement class="section btn-row">
+                <ui:Button name="btn-auto"   text="Auto Collect"  class="btn btn-primary"/>
+                <ui:Button name="btn-manual" text="Manual Collect" class="btn btn-teal"/>
+            </ui:VisualElement>
+            <ui:VisualElement class="section btn-row">
+                <ui:Button name="btn-confirm" text="Confirm Pose"  class="btn btn-primary btn-disabled"/>
+                <ui:Button name="btn-finish"  text="Finish + Solve" class="btn btn-green btn-disabled"/>
+            </ui:VisualElement>
+            <ui:VisualElement class="section btn-row">
+                <ui:Button name="btn-cancel" text="Cancel"    class="btn btn-danger btn-disabled"/>
+                <ui:Button name="btn-load"   text="Load JSON" class="btn btn-purple"/>
+            </ui:VisualElement>
+            <ui:VisualElement class="divider"/>
+            <ui:VisualElement class="section">
+                <ui:Label text="RESULT" class="section-header"/>
+                <ui:VisualElement class="row">
+                    <ui:Label text="PAIRS"    class="row-label"/>
+                    <ui:Label name="val-pairs"    text="0"  class="row-value"/>
+                </ui:VisualElement>
+                <ui:VisualElement class="row">
+                    <ui:Label text="RESIDUAL" class="row-label"/>
+                    <ui:Label name="val-residual" text="--" class="row-value"/>
+                </ui:VisualElement>
+                <ui:VisualElement class="row">
+                    <ui:Label text="T"        class="row-label"/>
+                    <ui:Label name="val-calib-t"  text="--" class="row-value"/>
+                </ui:VisualElement>
+            </ui:VisualElement>
+        </ui:VisualElement>
+    </ui:VisualElement>
+</ui:UXML>
