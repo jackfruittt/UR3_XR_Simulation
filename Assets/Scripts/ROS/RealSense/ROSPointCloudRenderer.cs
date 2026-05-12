@@ -31,8 +31,8 @@ public class ROSPointCloudRenderer : MonoBehaviour
     public string colorCompressedTopic     = "/camera/camera/color/image_raw/compressed";
     public string cameraInfoTopic          = "/camera/camera/color/camera_info";
 
-    [Tooltip("Use compressed JPEG colour stream instead of raw rgb8. At 480x270 raw is ~34 MB/s;\n" +
-             "prefer raw (false) for 90 Hz since JPEG decode blocks the main thread each frame.")]
+    [Tooltip("Use compressed JPEG colour stream instead of raw rgb8. At 640x480 raw is ~55 MB/s;\n" +
+             "prefer raw (false) for 60 Hz since JPEG decode blocks the main thread each frame.")]
     public bool useCompressedColor = false;
 
     [Header("Camera Intrinsics (Inspector fallback until camera_info arrives)")]

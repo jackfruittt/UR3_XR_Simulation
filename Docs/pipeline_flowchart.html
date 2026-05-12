@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>UR3 XR Sim — Pipeline Flowchart</title>
+    <style>
+        body {
+            background: #0d0d14;
+            color: #e0e0f0;
+            font-family: sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 24px;
+        }
+        h2 { color: #50c8ff; margin-bottom: 8px; }
+        .toolbar {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+        button {
+            background: #1e3a5f;
+            color: #e0e0f0;
+            border: 1px solid #50c8ff44;
+            border-radius: 4px;
+            padding: 8px 18px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        button:hover { background: #284f80; }
+        #diagram {
+            background: #111118;
+            border: 1px solid #ffffff14;
+            border-radius: 6px;
+            padding: 24px;
+        }
+    </style>
+</head>
+<body>
+    <h2>User → Unity → ROS → MoveIt Servo → Real Robot</h2>
+    <div class="toolbar">
+        <button onclick="saveSVG()">Save as SVG</button>
+        <button onclick="savePNG()">Save as PNG</button>
+    </div>
+    <div id="diagram">
+        <div class="mermaid">
+flowchart TD
+    subgraph USER["User Input"]
+        M["Mouse click / scroll\n(FPS crosshair mode)"]
+        XR["XR controller\n(Phase 3)"]
+    end
+
+    subgraph UNITY["Unity"]
+        EEF["EEFTargetController\n─────────────────\n• Arc trajectory\n• Work volume clamping\n• Puck position"]
+        FK["FKSolver\n─────────────────\nCurrent EEF pose\nfrom ArticulationBodies"]
+        ERR["Position error\npuck − EEF\n× Kp → clamped velocity"]
+        IK_LOCAL["JacobianIKSolver\n─────────────────\nDLS + GD blend\nSingularity check\nSelf-collision avoidance\nLocalPhysics mode only"]
+        ARTIC["ArticulationBodies\n(visual sim)"]
+        HANDLER["UR3ROSHandler\n─────────────────\nSetMode(RealHardware)\nIsRobotConnected heartbeat"]
+        PUB["TwistStamped publisher\n/servo_node/delta_twist_cmds\n~30 Hz"]
+        SUB["JointState subscriber\n/joint_states\n─────────────────\nHeartbeat → IsRobotConnected\nMirrors real joint angles\nonto ArticulationBodies"]
+    end
+
+    subgraph ROS["ROS 2"]
+        BRIDGE["ROS-TCP Connector\n(ros-tcp-endpoint)"]
+        SERVO["moveit_servo node\n─────────────────\n• Jacobian IK\n• DLS solver\n• Singularity guard\n• Self-collision check\n• Joint limit enforcement\n• ~30 Hz publish"]
+        SRVSTART["/servo_node/start_servo\nstd_srvs/Trigger"]
+        SRVSTOP["/servo_node/stop_servo\nstd_srvs/Trigger"]
+        DRIVER["ur_robot_driver\n─────────────────\nscaled_joint_trajectory\n_controller"]
+    end
+
+    subgraph ROBOT["Real UR3e"]
+        CTRL["UR e-Series controller\n─────────────────\nURCap / External Control"]
+        JOINTS["Joint encoders\n─────────────────\n/joint_states feedback"]
+    end
+
+    M --> EEF
+    XR --> EEF
+    EEF --> FK
+    FK --> ERR
+    ERR --> |"LocalPhysics\nmode"| IK_LOCAL
+    IK_LOCAL --> ARTIC
+
+    ERR --> |"RealHardware\nmode"| PUB
+    HANDLER -->|"SetMode triggers"| SRVSTART
+    HANDLER -->|"SetMode triggers"| SRVSTOP
+
+    PUB --> BRIDGE
+    BRIDGE --> SERVO
+    SRVSTART --> SERVO
+    SRVSTOP --> SERVO
+    SERVO --> DRIVER
+    DRIVER --> CTRL
+    CTRL --> JOINTS
+    JOINTS --> |"/joint_states"| BRIDGE
+    BRIDGE --> SUB
+    SUB --> ARTIC
+    SUB --> HANDLER
+
+    style USER fill:#1a1a2e,color:#e0e0f0,stroke:#444
+    style UNITY fill:#0d2137,color:#e0e0f0,stroke:#1e5f8a
+    style ROS fill:#1a2e1a,color:#e0e0f0,stroke:#2e7d32
+    style ROBOT fill:#2e1a0d,color:#e0e0f0,stroke:#8a3a1e
+    style IK_LOCAL fill:#0d2137,color:#aaa,stroke:#444,stroke-dasharray: 4 4
+    style SRVSTART fill:#1a2e1a,color:#aaa,stroke:#444,stroke-dasharray: 4 4
+    style SRVSTOP fill:#1a2e1a,color:#aaa,stroke:#444,stroke-dasharray: 4 4
+        </div>
+    </div>
+
+    <script type="module">
+        import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+        mermaid.initialize({ startOnLoad: true, theme: 'dark' });
+    </script>
+    <script>
+        function getSVGElement() {
+            return document.querySelector('#diagram svg');
+        }
+
+        function saveSVG() {
+            const svg = getSVGElement();
+            if (!svg) { alert('Diagram not yet rendered.'); return; }
+            const blob = new Blob([svg.outerHTML], { type: 'image/svg+xml' });
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(blob);
+            a.download = 'ur3_pipeline_flowchart.svg';
+            a.click();
+        }
+
+        function savePNG() {
+            const svg = getSVGElement();
+            if (!svg) { alert('Diagram not yet rendered.'); return; }
+
+            const svgData = new XMLSerializer().serializeToString(svg);
+            const canvas = document.createElement('canvas');
+            const scale = 2; // retina
+            canvas.width  = svg.viewBox.baseVal.width  * scale || svg.clientWidth  * scale;
+            canvas.height = svg.viewBox.baseVal.height * scale || svg.clientHeight * scale;
+
+            const ctx = canvas.getContext('2d');
+            ctx.scale(scale, scale);
+            ctx.fillStyle = '#111118';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            const img = new Image();
+            const svgBlob = new Blob([svgData], { type: 'image/svg+xml;charset=utf-8' });
+            img.onload = () => {
+                ctx.drawImage(img, 0, 0);
+                const a = document.createElement('a');
+                a.href = canvas.toDataURL('image/png');
+                a.download = 'ur3_pipeline_flowchart.png';
+                a.click();
+            };
+            img.src = URL.createObjectURL(svgBlob);
+        }
+    </script>
+</body>
+</html>

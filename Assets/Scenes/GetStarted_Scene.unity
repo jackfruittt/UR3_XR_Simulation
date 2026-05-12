@@ -2846,7 +2846,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::WristHUDController
   wristUxml: {fileID: 9197481963319205126, guid: 0495b139f20368e6eb5c3e6e18217625, type: 3}
-  wristTheme: {fileID: 0}
+  sourcePanelSettings: {fileID: 11400000, guid: f877907e9f3846e9ea7c5bdf22f1496c, type: 2}
   hudController: {fileID: 0}
   target: {fileID: 0}
   ikSolver: {fileID: 0}
@@ -3068,7 +3068,8 @@ Transform:
   m_LocalPosition: {x: 0.00000016585635, y: 0.000004962028, z: 0.012999747}
   m_LocalScale: {x: 0.124, y: 0.029, z: 0.026}
   m_ConstrainProportionsScale: 0
-  m_Children: []
+  m_Children:
+  - {fileID: 3150000002}
   m_Father: {fileID: 910000002}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
 --- !u!33 &910000005
@@ -3359,6 +3360,9 @@ MonoBehaviour:
   _autoCapture: 0
   _manualMode: 0
   _waypointTimeoutSec: 15
+  _pseudoDetection: 0
+  _pseudoCamLocalOffset: {x: 0.05, y: 0, z: 0.1}
+  _pseudoTagWorldPos: {x: 0, y: 6.3, z: 0.4}
 --- !u!1 &930000010
 GameObject:
   m_ObjectHideFlags: 0
@@ -3445,7 +3449,7 @@ MonoBehaviour:
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 930000010}
-  m_Enabled: 1
+  m_Enabled: 0
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 5c005c29e62fb93d3ab471aaa06300bc, type: 3}
   m_Name: 
@@ -5842,6 +5846,8 @@ MonoBehaviour:
   orientationTolerance: 0.01
   solverEnabled: 1
   logSingularityWarnings: 0
+  maxServoLinearSpeed: 0.3
+  maxServoAngularSpeed: 1
   escapeThreshold: 0.05
   singularityStuckTime: 1.5
   noProgressErrorThreshold: 0.08
@@ -5864,7 +5870,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: Assembly-CSharp::EEFTargetController
   fkSolver: {fileID: 1583647583}
   robotBase: {fileID: 458820245}
-  tableWorldHeight: 6.067
+  tableWorldHeight: 6.167
   tableMinRadius: 0.2
   tableMaxRadius: 0.5
   taskSpaceHeight: 0.3
@@ -5872,7 +5878,11 @@ MonoBehaviour:
   scrollHeightSpeed: 0.003
   clickMaxDuration: 0.2
   clickMaxMovePx: 12
-  toolApproachAxis: {x: 0, y: 1, z: 0}
+  toolApproachAxis: {x: -1, y: 1, z: 0}
+  approachOffset: 0.05
+  maxTiltDeg: 60
+  tiltSpeed: 60
+  spinSpeed: 90
   arcAngularSpeedDeg: 120
   arcRadiusFraction: 0.9
   arcBypassAngleDeg: 20
@@ -7322,6 +7332,8 @@ MonoBehaviour:
   _mode: 0
   jointStateTopic: /joint_states
   jointCommandTopic: /unity_joint_commands
+  servoTwistTopic: /servo_node/delta_twist_cmds
+  robotConnectedTimeoutSec: 2
   colorTopic: /camera/camera/color/image_raw
   colorCompressedTopic: /camera/camera/color/image_raw/compressed
   depthTopic: /camera/camera/depth/image_rect_raw
@@ -7368,7 +7380,6 @@ Transform:
   - {fileID: 1661118088}
   - {fileID: 930000002}
   - {fileID: 1457260155}
-  - {fileID: 3150000002}
   - {fileID: 2106578749}
   - {fileID: 449343048}
   m_Father: {fileID: 0}
@@ -7930,12 +7941,12 @@ Transform:
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 3150000001}
   serializedVersion: 2
-  m_LocalRotation: {x: -0, y: -0, z: 1, w: 0}
-  m_LocalPosition: {x: 2.75, y: 0.67485, z: 2.24216}
-  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_LocalRotation: {x: -0.70710677, y: -0.7071067, z: -0.00000009658095, w: 0.00000006733178}
+  m_LocalPosition: {x: 0, y: 0, z: 0}
+  m_LocalScale: {x: 34.482765, y: 8.064516, z: 38.46154}
   m_ConstrainProportionsScale: 0
   m_Children: []
-  m_Father: {fileID: 1934327296}
+  m_Father: {fileID: 910000004}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 180}
 --- !u!33 &3150000003
 MeshFilter:

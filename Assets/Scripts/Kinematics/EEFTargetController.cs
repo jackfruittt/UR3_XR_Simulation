@@ -5,17 +5,24 @@ using UnityEngine.InputSystem;
 using UnityEngine.Rendering;
 using UnityEngine.InputSystem.XR;
 
-/// Interactive EEF target controller - cylindrical annular work volume.
+/// Interactive EEF target controller - cylindrical annular work volume with full 6DOF pose control.
 ///
 /// The work volume is a hollow cylinder centred on the robot base:
 ///   XZ plane : annular ring [tableMinRadius, tableMaxRadius]
 ///   Y axis   : [tableWorldHeight, tableWorldHeight + taskSpaceHeight]
 /// The boundary is visualised at runtime as bottom + top rings with vertical struts.
 ///
-/// EEF ORIENTATION: Always locked pointing straight down.  The IK solver should
-///   have orientationWeight > 0 to enforce this; it is set on TargetRotation every frame.
+/// EEF POSE: The puck carries a full orientation. TargetPosition is the EEF hover point
+///   (approachOffset metres along the puck face normal from the puck anchor). TargetRotation
+///   aligns toolApproachAxis into the puck face - like visual servoing against an AR tag.
 ///
-/// FPS CROSSHAIR MODE (cursor locked)::
+/// ORIENTATION INPUT:
+///   XR left thumbstick   - tilt the puck face (pitch + roll, clamped to maxTiltDeg)
+///   XR right thumbstick x - spin the puck around its approach axis (tool spin)
+///   Keyboard T / G       - pitch tilt forward / back (desktop fallback)
+///   Keyboard Q / E       - spin counter-clockwise / clockwise (desktop fallback)
+///
+/// FPS CROSSHAIR MODE (cursor locked):
 ///   Short LMB click  - 3-D ray-pick inside the ring; arm arcs to the new position.
 ///   Long hold + move - drag puck on camera-facing plane (continuous positioning).
 ///   Scroll wheel     - moves puck up/down within the height volume.
@@ -61,6 +68,20 @@ public class EEFTargetController : MonoBehaviour
              "Use Vector3.forward (0,0,1) if the URDF was imported without axis remapping.\n" +
              "Use Vector3.down (0,-1,0) if the arm ends up pointing the wrong way entirely.")]
     public Vector3 toolApproachAxis = Vector3.up;
+
+    [Header("Full Pose Control")]
+    [Tooltip("Distance the EEF hovers in front of the puck face along its normal (metres). 0 = EEF at puck surface.")]
+    public float approachOffset = 0.05f;
+
+    [Tooltip("Maximum tilt from straight-down (degrees). Prevents impossible joint configurations.")]
+    [Range(0f, 85f)]
+    public float maxTiltDeg = 60f;
+
+    [Tooltip("Tilt speed via XR left thumbstick or keyboard T/G (degrees per second).")]
+    public float tiltSpeed = 60f;
+
+    [Tooltip("Spin speed via XR right thumbstick or keyboard Q/E (degrees per second).")]
+    public float spinSpeed = 90f;
 
     [Header("Arc Trajectory")]
     [Tooltip("Angular sweep speed for the arc phase (degrees/second). Higher = faster arc.")]
@@ -146,23 +167,53 @@ public class EEFTargetController : MonoBehaviour
     private bool         _xrAimingAtPuck;          // true when ray is close to puck
     private const float  XRHoverRadius = 0.12f;    // metres — ray-tip within this = hover
 
+    // Full pose control.
+    // _puckAnchor is the physical world-space puck position.
+    // TargetPosition is derived: _puckAnchor + face normal * approachOffset.
+    // TargetRotation is derived: toolApproachAxis aligned into the puck face.
+    private Vector3    _puckAnchor   = Vector3.zero;
+    private float      _puckPitch    = 0f;   // tilt forward/back (degrees)
+    private float      _puckRoll     = 0f;   // tilt left/right (degrees)
+    private float      _puckSpin     = 0f;   // spin around approach axis (degrees)
+    private Quaternion _puckRotation = Quaternion.identity;
+
+    // XR input actions for puck orientation control.
+    private InputAction  _xrLeftStickAction;
+    private InputAction  _xrRightStickAction;
+
+    // LineRenderer from puck face center to EEF hover point, showing approach direction.
+    private LineRenderer _approachArrow;
+    private Material     _approachArrowMat;
+
     void Awake() { ActiveInstance = this; }
     void OnDestroy()
     {
         if (_wireMat) Destroy(_wireMat);
         if (_ringMat) Destroy(_ringMat);
+        if (_approachArrowMat) Destroy(_approachArrowMat);
         _xrTriggerAction?.Dispose();
+        _xrLeftStickAction?.Dispose();
+        _xrRightStickAction?.Dispose();
     }
 
     void Start()
     {
         _cam = Camera.main;
 
-        // XR trigger+grip action — either right-hand trigger or grip activates puck control.
+        // XR trigger+grip action - either right-hand trigger or grip activates puck control.
         _xrTriggerAction = new InputAction("XRSelect", InputActionType.Button);
         _xrTriggerAction.AddBinding("<XRController>{RightHand}/triggerButton");
         _xrTriggerAction.AddBinding("<XRController>{RightHand}/gripButton");
         _xrTriggerAction.Enable();
+
+        // Left thumbstick controls puck tilt, right thumbstick x-axis controls spin.
+        _xrLeftStickAction = new InputAction("XRLeftStick", InputActionType.Value,
+            binding: "<XRController>{LeftHand}/thumbstick");
+        _xrLeftStickAction.Enable();
+
+        _xrRightStickAction = new InputAction("XRRightStick", InputActionType.Value,
+            binding: "<XRController>{RightHand}/thumbstick");
+        _xrRightStickAction.Enable();
 
         // Seed target at the current FK EEF position projected onto the table surface.
         // Zero initial IK error keeps the arm still. Solver also gated by HasBeenGrabbed.
@@ -170,7 +221,7 @@ public class EEFTargetController : MonoBehaviour
             ? fkSolver.GetEEFPosition()
             : (robotBase != null ? robotBase.position : Vector3.zero);
         ClampAndSetTarget(new Vector3(eefWorld.x, tableWorldHeight, eefWorld.z));
-        TargetRotation = Quaternion.FromToRotation(toolApproachAxis.normalized, Vector3.down);
+        RefreshPose();
 
         // Flat puck disc (cylinder squashed to puckHeight)
         _puck = GameObject.CreatePrimitive(PrimitiveType.Cylinder);
@@ -185,7 +236,21 @@ public class EEFTargetController : MonoBehaviour
         _currentPuckColor = markerColorIdle;
         SetPuckColor(_currentPuckColor);
         // Lift by half height so the flat base sits exactly on the table surface.
-        _puck.transform.position = TargetPosition + Vector3.up * (puckHeight * 0.5f);
+        _puck.transform.position = _puckAnchor + Vector3.up * (puckHeight * 0.5f);
+        _puck.transform.rotation = Quaternion.identity;
+
+        // Arrow LineRenderer from puck face center to the EEF hover point.
+        var arrowGo = new GameObject("PuckApproachArrow");
+        arrowGo.transform.SetParent(_puck.transform, false);
+        _approachArrow              = arrowGo.AddComponent<LineRenderer>();
+        _approachArrow.positionCount = 2;
+        _approachArrow.startWidth   = 0.006f;
+        _approachArrow.endWidth     = 0.002f;
+        _approachArrow.useWorldSpace = true;
+        _approachArrow.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+        _approachArrowMat = new Material(_puckMat);
+        ApplyColor(_approachArrowMat, new Color(0.8f, 0.9f, 1f, 0.85f));
+        _approachArrow.material = _approachArrowMat;
 
         // Runtime volume cage (LineRenderer)
         _ringMat = new Material(_puckMat);
@@ -273,15 +338,43 @@ public class EEFTargetController : MonoBehaviour
     {
         if (_cam == null) { _cam = Camera.main; return; }
 
-        // EEF orientation: ALWAYS locked pointing straight down
-        // Align toolApproachAxis (configured in Inspector) with world-down.
-        // Quaternion.FromToRotation finds the minimal-arc rotation from the
-        // local approach axis to world-down
-        TargetRotation = Quaternion.FromToRotation(toolApproachAxis.normalized, Vector3.down);
+        // Orientation input: XR left stick = tilt (pitch/roll), right stick x = spin.
+        // Desktop fallback: T/G = pitch tilt forward/back, Q/E = spin.
+        if (XRRigSetup.Instance != null && XRRigSetup.Instance.IsXRActive)
+        {
+            Vector2 leftStick  = _xrLeftStickAction  != null
+                ? _xrLeftStickAction.ReadValue<Vector2>()  : Vector2.zero;
+            Vector2 rightStick = _xrRightStickAction != null
+                ? _xrRightStickAction.ReadValue<Vector2>() : Vector2.zero;
+
+            _puckPitch = Mathf.Clamp(_puckPitch - leftStick.y * tiltSpeed * Time.deltaTime, -maxTiltDeg, maxTiltDeg);
+            _puckRoll  = Mathf.Clamp(_puckRoll  + leftStick.x * tiltSpeed * Time.deltaTime, -maxTiltDeg, maxTiltDeg);
+            _puckSpin += rightStick.x * spinSpeed * Time.deltaTime;
+        }
+        else
+        {
+            var kb = Keyboard.current;
+            if (kb != null)
+            {
+                if (kb.tKey.isPressed) _puckPitch = Mathf.Clamp(_puckPitch - tiltSpeed * Time.deltaTime, -maxTiltDeg, maxTiltDeg);
+                if (kb.gKey.isPressed) _puckPitch = Mathf.Clamp(_puckPitch + tiltSpeed * Time.deltaTime, -maxTiltDeg, maxTiltDeg);
+                if (kb.qKey.isPressed) _puckSpin -= spinSpeed * Time.deltaTime;
+                if (kb.eKey.isPressed) _puckSpin += spinSpeed * Time.deltaTime;
+            }
+        }
+
+        // Clamp total tilt so the diagonal does not exceed maxTiltDeg.
+        float totalTilt = Mathf.Sqrt(_puckPitch * _puckPitch + _puckRoll * _puckRoll);
+        if (totalTilt > maxTiltDeg)
+        {
+            float scale = maxTiltDeg / totalTilt;
+            _puckPitch *= scale;
+            _puckRoll  *= scale;
+        }
 
         bool cursorLocked = Cursor.lockState == CursorLockMode.Locked;
 
-        bool rawInRange = cursorLocked || IsAimedAt(false, TargetPosition);
+        bool rawInRange = cursorLocked || IsAimedAt(false, _puckAnchor);
         if (rawInRange) _aimLatchTimer = AimLatchDuration;
         else            _aimLatchTimer -= Time.deltaTime;
         IsInCrosshairRange = rawInRange || _aimLatchTimer > 0f;
@@ -356,7 +449,7 @@ public class EEFTargetController : MonoBehaviour
             if (IsControllingTarget)
             {
                 // Re-anchor every frame so the puck tracks the crosshair exactly.
-                _dragPlane = new Plane(-_cam.transform.forward, TargetPosition);
+                _dragPlane = new Plane(-_cam.transform.forward, _puckAnchor);
                 DragOnTable(mouse);
             }
         }
@@ -381,7 +474,18 @@ public class EEFTargetController : MonoBehaviour
         _puck.transform.localScale = new Vector3(
             puckDiameter * newScale, puckHeight * 0.5f, puckDiameter * newScale);
 
-        _puck.transform.position = TargetPosition + Vector3.up * (puckHeight * 0.5f);
+        // Derive TargetPosition and TargetRotation, then update puck mesh pose.
+        RefreshPose();
+        _puck.transform.rotation = _puckRotation;
+        _puck.transform.position = _puckAnchor + _puckRotation * Vector3.up * (puckHeight * 0.5f);
+
+        // Point approach arrow from puck face center toward the EEF hover target.
+        if (_approachArrow != null)
+        {
+            _approachArrow.SetPosition(0, _puckAnchor);
+            _approachArrow.SetPosition(1, TargetPosition);
+            ApplyColor(_approachArrowMat, _currentPuckColor * 1.2f);
+        }
     }
 
     // XR controller methods
@@ -414,11 +518,11 @@ public class EEFTargetController : MonoBehaviour
         TryPickByControllerRay(ray, out Vector3 hit);
 
         // Check how close the ray tip is to the puck.
-        float distToPuck = Vector3.Distance(hit, TargetPosition);
+        float distToPuck = Vector3.Distance(hit, _puckAnchor);
         _xrAimingAtPuck  = distToPuck < XRHoverRadius;
 
         // Snap the tip to the puck when hovering so it's obvious.
-        Vector3 tip = _xrAimingAtPuck ? TargetPosition : hit;
+        Vector3 tip = _xrAimingAtPuck ? _puckAnchor : hit;
 
         // Line colour: green = hovering over puck, cyan = free aim.
         Color lineCol = _xrAimingAtPuck
@@ -481,7 +585,7 @@ public class EEFTargetController : MonoBehaviour
         // Continuous drag: place puck at ray-vs-table-plane intersection every frame.
         if (IsControllingTarget && _xrTrigDragging)
         {
-            var tablePlane = new Plane(Vector3.up, new Vector3(0f, TargetPosition.y, 0f));
+            var tablePlane = new Plane(Vector3.up, new Vector3(0f, _puckAnchor.y, 0f));
             if (tablePlane.Raycast(ray, out float enter))
                 ClampAndSetTarget(ray.GetPoint(enter));
         }
@@ -490,9 +594,9 @@ public class EEFTargetController : MonoBehaviour
     // Cast a ray from the controller and intersect with the work volume.
     bool TryPickByControllerRay(Ray ray, out Vector3 result)
     {
-        result = TargetPosition;
+        result = _puckAnchor;
 
-        var hPlane = new Plane(Vector3.up, new Vector3(0f, TargetPosition.y, 0f));
+        var hPlane = new Plane(Vector3.up, new Vector3(0f, _puckAnchor.y, 0f));
         if (hPlane.Raycast(ray, out float ht))
         {
             result = ClampToVolume(ray.GetPoint(ht));
@@ -520,16 +624,16 @@ public class EEFTargetController : MonoBehaviour
         if (_dragPlane.Raycast(ray, out float enter))
         {
             Vector3 hit = ray.GetPoint(enter);
-            ClampAndSetTarget(new Vector3(hit.x, TargetPosition.y, hit.z));
+            ClampAndSetTarget(new Vector3(hit.x, _puckAnchor.y, hit.z));
         }
 
         float scroll = m.scroll.ReadValue().y;
         if (Mathf.Abs(scroll) > 0.01f)
         {
-            float newY = Mathf.Clamp(TargetPosition.y + scroll * scrollHeightSpeed,
+            float newY = Mathf.Clamp(_puckAnchor.y + scroll * scrollHeightSpeed,
                                      tableWorldHeight,
                                      tableWorldHeight + taskSpaceHeight);
-            TargetPosition = new Vector3(TargetPosition.x, newY, TargetPosition.z);
+            _puckAnchor = new Vector3(_puckAnchor.x, newY, _puckAnchor.z);
         }
     }
 
@@ -538,12 +642,27 @@ public class EEFTargetController : MonoBehaviour
     public void SetTarget(Vector3 position, Quaternion rotation)
     {
         ClampAndSetTarget(position);
-        TargetRotation = rotation;
-        HasBeenGrabbed = true; // allow IK solver to run
+        // Decompose rotation to euler so the incremental input keeps working after an external set.
+        Vector3 e  = rotation.eulerAngles;
+        _puckPitch = e.x > 180f ? e.x - 360f : e.x;
+        _puckSpin  = e.y;
+        _puckRoll  = e.z > 180f ? e.z - 360f : e.z;
+        HasBeenGrabbed = true;
     }
 
     // Clamp XZ to annular ring and Y to work volume.
-    void ClampAndSetTarget(Vector3 world) => TargetPosition = ClampToVolume(world);
+    void ClampAndSetTarget(Vector3 world) => _puckAnchor = ClampToVolume(world);
+
+    // Recomputes TargetPosition and TargetRotation from the puck anchor and current orientation.
+    // TargetPosition is the EEF hover point, approachOffset metres along the puck face normal.
+    // TargetRotation aligns toolApproachAxis to point into the puck face.
+    void RefreshPose()
+    {
+        _puckRotation  = Quaternion.Euler(_puckPitch, _puckSpin, _puckRoll);
+        Vector3 normal = _puckRotation * Vector3.up;
+        TargetPosition = _puckAnchor + normal * approachOffset;
+        TargetRotation = Quaternion.FromToRotation(toolApproachAxis.normalized, -normal);
+    }
 
     Vector3 ClampToVolume(Vector3 world)
     {
@@ -568,7 +687,7 @@ public class EEFTargetController : MonoBehaviour
     /// annular ring.  Falls back to the cylinder side-wall for near-horizontal rays.
     bool TryPickTargetByRay(out Vector3 result)
     {
-        result = TargetPosition;
+        result = _puckAnchor;
         if (_cam == null) return false;
 
         Ray ray = (Cursor.lockState == CursorLockMode.Locked)
@@ -581,7 +700,7 @@ public class EEFTargetController : MonoBehaviour
         // Primary: intersect with the horizontal plane at the current puck height.
         // This correctly maps the crosshair to an arbitrary XZ position inside the ring,
         // regardless of whether the camera is inside or outside the outer boundary.
-        var hPlane = new Plane(Vector3.up, new Vector3(0f, TargetPosition.y, 0f));
+        var hPlane = new Plane(Vector3.up, new Vector3(0f, _puckAnchor.y, 0f));
         if (hPlane.Raycast(ray, out float ht))
         {
             result = ClampToVolume(ray.GetPoint(ht));
@@ -648,10 +767,10 @@ public class EEFTargetController : MonoBehaviour
         float bz = robotBase != null ? robotBase.position.z : 0f;
 
         // Decompose source and destination into cylindrical coordinates.
-        Vector2 src2 = new Vector2(TargetPosition.x - bx, TargetPosition.z - bz);
+        Vector2 src2 = new Vector2(_puckAnchor.x - bx, _puckAnchor.z - bz);
         _arcR0     = Mathf.Clamp(src2.magnitude, tableMinRadius, tableMaxRadius);
         _arcTheta0 = Mathf.Atan2(src2.x, src2.y);   // angle from +Z in XZ plane
-        _arcY0     = TargetPosition.y;
+        _arcY0     = _puckAnchor.y;
 
         Vector2 dst2 = new Vector2(dest.x - bx, dest.z - bz);
         _arcR1     = Mathf.Clamp(dst2.magnitude, tableMinRadius, tableMaxRadius);
@@ -672,7 +791,7 @@ public class EEFTargetController : MonoBehaviour
         {
             // Small angle -> interpolate directly through the volume.
             _arcRa = (_arcR0 + _arcR1) * 0.5f;      // dummy "arc radius"; phases still work
-            _arcDuration = Vector3.Distance(TargetPosition, dest) / Mathf.Max(linearSpeed, 0.01f);
+            _arcDuration = Vector3.Distance(_puckAnchor, dest) / Mathf.Max(linearSpeed, 0.01f);
         }
         else
         {
@@ -723,14 +842,14 @@ public class EEFTargetController : MonoBehaviour
 
         if (_arcT >= 1f)
         {
-            _arcActive     = false;
-            TargetPosition = _finalTarget;   // Snap to exact destination
+            _arcActive  = false;
+            _puckAnchor = _finalTarget;
             return;
         }
 
         float bx = robotBase != null ? robotBase.position.x : 0f;
         float bz = robotBase != null ? robotBase.position.z : 0f;
-        TargetPosition = new Vector3(
+        _puckAnchor = new Vector3(
             bx + r * Mathf.Sin(theta),
             y,
             bz + r * Mathf.Cos(theta));
@@ -740,8 +859,8 @@ public class EEFTargetController : MonoBehaviour
     public float TableNormalisedRadius()
     {
         if (robotBase == null) return 0f;
-        Vector2 o    = new Vector2(TargetPosition.x - robotBase.position.x,
-                                   TargetPosition.z - robotBase.position.z);
+        Vector2 o    = new Vector2(_puckAnchor.x - robotBase.position.x,
+                                   _puckAnchor.z - robotBase.position.z);
         float span = tableMaxRadius - tableMinRadius;
         return span > 1e-4f ? Mathf.Clamp01((o.magnitude - tableMinRadius) / span) : 0f;
     }

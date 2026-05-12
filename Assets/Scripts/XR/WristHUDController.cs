@@ -39,7 +39,7 @@ public class WristHUDController : MonoBehaviour
     [Tooltip("Local position offset from Left Controller origin.")]
     public Vector3 quadLocalPos    = new Vector3(0f, 0.12f, 0f);
     [Tooltip("Local Euler rotation so it faces up toward the wearer.")]
-    public Vector3 quadLocalEuler  = new Vector3(-45f, 0f, 0f);
+    public Vector3 quadLocalEuler  = new Vector3(45f, 0f, 0f);
 
     [Header("Render Texture")]
     public int rtWidth   = 600;

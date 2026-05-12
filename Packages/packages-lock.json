@@ -1,7 +1,7 @@
 {
   "dependencies": {
     "com.unity.addressables": {
-      "version": "2.8.1",
+      "version": "2.9.0",
       "depth": 1,
       "source": "registry",
       "dependencies": {
@@ -11,7 +11,7 @@
         "com.unity.modules.jsonserialize": "1.0.0",
         "com.unity.modules.imageconversion": "1.0.0",
         "com.unity.modules.unitywebrequest": "1.0.0",
-        "com.unity.scriptablebuildpipeline": "2.5.2",
+        "com.unity.scriptablebuildpipeline": "2.6.0",
         "com.unity.modules.unitywebrequestassetbundle": "1.0.0"
       },
       "url": "https://packages.unity.com"
@@ -342,7 +342,7 @@
       }
     },
     "com.unity.robotics.ros-tcp-connector": {
-      "version": "file:/home/jackfruittt/Software/ROS-TCP-Connector/com.unity.robotics.ros-tcp-connector",
+      "version": "file:/home/jackfruittt/Software/unity_projects/ROS-TCP-Connector/com.unity.robotics.ros-tcp-connector",
       "depth": 0,
       "source": "local",
       "dependencies": {}
@@ -356,13 +356,13 @@
       }
     },
     "com.unity.robotics.visualizations": {
-      "version": "file:/home/jackfruittt/Software/ROS-TCP-Connector/com.unity.robotics.visualizations",
+      "version": "file:/home/jackfruittt/Software/unity_projects/ROS-TCP-Connector/com.unity.robotics.visualizations",
       "depth": 0,
       "source": "local",
       "dependencies": {}
     },
     "com.unity.scriptablebuildpipeline": {
-      "version": "2.5.2",
+      "version": "2.6.0",
       "depth": 2,
       "source": "registry",
       "dependencies": {
@@ -414,7 +414,7 @@
       }
     },
     "com.unity.splines": {
-      "version": "2.8.2",
+      "version": "2.8.3",
       "depth": 1,
       "source": "registry",
       "dependencies": {
@@ -614,7 +614,7 @@
       "url": "https://packages.unity.com"
     },
     "com.unity.xr.management": {
-      "version": "4.5.3",
+      "version": "4.5.4",
       "depth": 1,
       "source": "registry",
       "dependencies": {

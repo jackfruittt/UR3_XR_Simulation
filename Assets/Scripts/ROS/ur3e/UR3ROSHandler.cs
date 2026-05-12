@@ -2,7 +2,9 @@
 
 using System;
 using Unity.Robotics.ROSTCPConnector;
+using Unity.Robotics.ROSTCPConnector.ROSGeometry;
 using RosMessageTypes.Sensor;
+using RosMessageTypes.Geometry;
 using UnityEngine;
 
 /// Centralised ROS interface for the UR3e.
@@ -70,6 +72,13 @@ public class UR3ROSHandler : MonoBehaviour
              "works when a relay node remaps to the correct action server.")]
     public string jointCommandTopic = "/unity_joint_commands";
 
+    [Header("Servo (RealHardware mode)")]
+    [Tooltip("MoveIt Servo incoming Cartesian velocity topic. Must match servo_node config.")]
+    public string servoTwistTopic = "/servo_node/delta_twist_cmds";
+
+    [Tooltip("Seconds without a /joint_states message before IsRobotConnected reports false.")]
+    public float robotConnectedTimeoutSec = 2f;
+
     // Camera topics (read-only properties for external subscribers)
 
     [Header("Camera Topics")]
@@ -112,7 +121,9 @@ public class UR3ROSHandler : MonoBehaviour
     // Private state
 
     ROSConnection _ros;
-    bool          _rosRegistered = false;
+    bool          _rosRegistered       = false;
+    bool          _servoRegistered     = false;
+    float         _lastJointStateTime  = -999f;
     readonly float[] _jointStateDeg = new float[6];
 
     static readonly string[] JointNames = {
@@ -131,6 +142,11 @@ public class UR3ROSHandler : MonoBehaviour
 
     /// True when the ROS-TCP connection exists and has been initialised.
     public bool IsROSActive => _ros != null;
+
+    /// True when a /joint_states message has arrived within robotConnectedTimeoutSec.
+    /// Used by JacobianIKSolver to gate servo publishing and detect connection loss.
+    public bool IsRobotConnected =>
+        (UnityEngine.Time.realtimeSinceStartup - _lastJointStateTime) < robotConnectedTimeoutSec;
 
     // MonoBehaviour
 
@@ -294,6 +310,9 @@ public class UR3ROSHandler : MonoBehaviour
         if (_mode != RobotMode.LocalPhysics && _publisher != null)
             ApplyJointStateToBodies(msg);
 
+        // Record the timestamp so IsRobotConnected can detect connection loss.
+        _lastJointStateTime = UnityEngine.Time.realtimeSinceStartup;
+
         // Fire event for any listener (IK, calibration collector, HUD, etc.)
         OnJointStateReceived?.Invoke(_jointStateDeg);
     }
@@ -317,6 +336,52 @@ public class UR3ROSHandler : MonoBehaviour
                 }
             }
         }
+    }
+
+    // Servo Cartesian velocity publishing
+
+    // Publishes linearROS and angularROS as a TwistStamped to MoveIt Servo.
+    // Both vectors must already be in ROS FLU coordinates in the base_link frame.
+    public void SendServoTwist(Vector3 linearUnity, Vector3 angularUnity)
+    {
+        if (_ros == null)
+        {
+            Debug.LogWarning("[UR3ROSHandler] Cannot publish servo twist: ROS not initialised.");
+            return;
+        }
+
+        EnsureServoPublisherRegistered();
+
+        var linearROS  = linearUnity.To<FLU>();
+        var angularROS = angularUnity.To<FLU>();
+
+        var msg = new TwistStampedMsg
+        {
+            header = new RosMessageTypes.Std.HeaderMsg
+            {
+                frame_id = "base_link",
+                stamp = new RosMessageTypes.BuiltinInterfaces.TimeMsg
+                {
+                    sec     = (int)Time.time,
+                    nanosec = (uint)((Time.time - (int)Time.time) * 1e9f)
+                }
+            },
+            twist = new TwistMsg
+            {
+                linear  = new RosMessageTypes.Geometry.Vector3Msg(linearROS.x,  linearROS.y,  linearROS.z),
+                angular = new RosMessageTypes.Geometry.Vector3Msg(angularROS.x, angularROS.y, angularROS.z)
+            }
+        };
+
+        _ros.Publish(servoTwistTopic, msg);
+    }
+
+    void EnsureServoPublisherRegistered()
+    {
+        if (_servoRegistered) return;
+        if (_ros == null) _ros = ROSConnection.GetOrCreateInstance();
+        _ros.RegisterPublisher<TwistStampedMsg>(servoTwistTopic);
+        _servoRegistered = true;
     }
 
     // Joint command publishing

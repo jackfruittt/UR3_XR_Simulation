@@ -1,6 +1,7 @@
 // Author: Jackson Russell
 
 using UnityEngine;
+using Unity.Robotics.ROSTCPConnector.ROSGeometry;
 
 /// RMRC + Gradient Descent IK controller for the UR3e.
 ///
@@ -72,6 +73,13 @@ public class JacobianIKSolver : MonoBehaviour
 
     [Tooltip("Log singularity warnings to Console.")]
     public bool logSingularityWarnings = true;
+
+    [Header("Servo (RealHardware mode)")]
+    [Tooltip("Maximum EEF linear speed (m/s) sent to MoveIt Servo. Prevents large jumps when the puck is placed far away.")]
+    public float maxServoLinearSpeed = 0.3f;
+
+    [Tooltip("Maximum EEF angular speed (rad/s) sent to MoveIt Servo.")]
+    public float maxServoAngularSpeed = 1.0f;
 
     [Header("Singularity Escape")]
     [Tooltip("Beta threshold for stuck detection; triggers auto-home after singularityStuckTime seconds.")]
@@ -266,6 +274,36 @@ public class JacobianIKSolver : MonoBehaviour
             _v[3] = 0f;
             _v[4] = 0f;
             _v[5] = 0f;
+        }
+
+        // Servo pathway - active when the real robot is connected.
+        // Publishes the desired Cartesian velocity to MoveIt Servo rather than solving
+        // joint velocities locally. Servo runs its own DLS solver, singularity guard,
+        // and joint limit checks on the ROS side.
+        if (UR3ROSHandler.Instance != null
+            && UR3ROSHandler.Instance.Mode == UR3ROSHandler.RobotMode.RealHardware
+            && UR3ROSHandler.Instance.IsRobotConnected)
+        {
+            // v[0..2] is in Unity world space - bring it into base_link local space
+            // then remap axes to ROS FLU before publishing.
+            var linUnity = new Vector3(_v[0], _v[1], _v[2]);
+            var angUnity = new Vector3(_v[3], _v[4], _v[5]);
+
+            float linSpeed = linUnity.magnitude;
+            if (linSpeed > maxServoLinearSpeed)
+                linUnity *= maxServoLinearSpeed / linSpeed;
+
+            float angSpeed = angUnity.magnitude;
+            if (angSpeed > maxServoAngularSpeed)
+                angUnity *= maxServoAngularSpeed / angSpeed;
+
+            // InverseTransformDirection converts world space to base_link local without scale.
+            Vector3 linBase = fkSolver.baseLinkTransform.InverseTransformDirection(linUnity);
+            Vector3 angBase = fkSolver.baseLinkTransform.InverseTransformDirection(angUnity);
+
+            // To<FLU>() remaps Unity left-hand axes to ROS right-hand FLU convention.
+            UR3ROSHandler.Instance.SendServoTwist(linBase, angBase);
+            return;
         }
 
         // 3. Geometric Jacobian J (6x6).

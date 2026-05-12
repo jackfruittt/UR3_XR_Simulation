@@ -43,8 +43,8 @@ def generate_launch_description():
                 # Color: 480x270 is the only mode supporting 90fps on D455
                 # Depth: 640x480x90; align_depth downsamples to match color (480x270)
                 # infra_profile omitted, declaring it triggers IR even with enable_infra1/2=False
-                'depth_module.depth_profile': '640x480x90',
-                'rgb_camera.color_profile':   '480x270x90',
+                'depth_module.depth_profile': '640x480x60',
+                'rgb_camera.color_profile':   '640x480x60',
 
                 # OUTPUT RAW 16-BIT DEPTH (not colorized)
                 'depth_module.depth_format': 'Z16',

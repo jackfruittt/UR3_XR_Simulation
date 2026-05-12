@@ -86,3 +86,7 @@ crashlytics-build.properties
 # Other
 .idea/
 __pycache__/
+
+# Scripts symlink - points to ~/Software/scripts (external, Docker-mounted).
+# The symlink itself is tracked; the cal/ data it contains is not.
+scripts/cal/
